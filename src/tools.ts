@@ -270,7 +270,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_view_cart',
     {
-      description: 'Show everything currently in the cart, with the running total and the checkout URL. Reads local state only — no network call.',
+      description: 'Show everything currently in the cart, with the running total and the checkout URL. Reads local state only — no network call. Give the user the checkout URL: the Rami Levy site shows these items once its checkout page loads, not on the home-page cart icon.',
       inputSchema: {},
     },
     withErrorBoundary(h.viewCart),

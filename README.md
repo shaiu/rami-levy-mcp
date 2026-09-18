@@ -75,6 +75,21 @@ the transport level (`auth_expired`, `blocked_by_cloudflare`,
 `network_error`), the local cart is rolled back: `ok: false` means nothing
 changed, so retrying is safe.
 
+### Where the synced cart shows up on the website
+
+Rami Levy stores the last-synced cart server-side, per account. The website
+keeps its own copy of the cart in the browser, and **merges the server cart
+into it only when the checkout page (`/he/dashboard/checkout`) loads**. The
+home page's cart icon shows the browser's copy alone, so it won't reflect
+anything this server added until the checkout page has been opened once.
+Point people at the `checkoutUrl` that `rami_levy_view_cart` returns.
+(Measured live on 2026-09-18.)
+
+Because that step is a merge, removals don't propagate. If the browser
+already holds a product, `remove_item` or `clear_cart` deletes it from the
+server cart, but the browser's copy brings it back the next time checkout
+loads. Adds and quantities from this server always show up.
+
 ## Errors
 
 Every tool responds with `{ ok: false, reason, ... }` instead of throwing.
