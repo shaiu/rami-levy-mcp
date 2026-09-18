@@ -20,6 +20,24 @@ async function syncAndReport(store: CartStore, client: RamiLevyClient): Promise<
   return client.syncCart(cartPayload(store));
 }
 
+// Syncs the full cart and folds the result into the {ok/reason..., ...extra,
+// cartTotal, itemCount} shape shared by addItem, removeItem, and
+// reorderFromHistory — the only difference between call sites is `extra`
+// (e.g. reorderFromHistory's `added` list).
+async function syncAndSummarize(
+  store: CartStore,
+  client: RamiLevyClient,
+  extra: Record<string, unknown> = {},
+): Promise<Record<string, unknown>> {
+  const sync = await syncAndReport(store, client);
+  return {
+    ...(sync.ok ? { ok: true } : sync),
+    ...extra,
+    cartTotal: store.getTotal(),
+    itemCount: store.size,
+  };
+}
+
 export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
   return {
     async searchProducts(args: { query: string; limit?: number }): Promise<Content> {
@@ -30,12 +48,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
     async addItem(args: { productId: string; name: string; price: number; qty?: number }): Promise<Content> {
       const qty = args.qty ?? 1;
       store.addItem(args.productId, args.name, args.price, qty);
-      const sync = await syncAndReport(store, client);
-      return json({
-        ...(sync.ok ? { ok: true } : sync),
-        cartTotal: store.getTotal(),
-        itemCount: store.size,
-      });
+      return json(await syncAndSummarize(store, client));
     },
 
     async viewCart(): Promise<Content> {
@@ -55,12 +68,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       if (!removed) {
         return json({ ok: false, reason: 'not_in_cart', productId: args.productId });
       }
-      const sync = await syncAndReport(store, client);
-      return json({
-        ...(sync.ok ? { ok: true } : sync),
-        cartTotal: store.getTotal(),
-        itemCount: store.size,
-      });
+      return json(await syncAndSummarize(store, client));
     },
 
     async clearCart(): Promise<Content> {
@@ -126,13 +134,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         return json({ ok: true, added: [], message: `No items appear in ${minOccurrences}+ of the last ${selected.length} orders` });
       }
 
-      const sync = await syncAndReport(store, client);
-      return json({
-        ...(sync.ok ? { ok: true } : sync),
-        added,
-        cartTotal: store.getTotal(),
-        itemCount: store.size,
-      });
+      return json(await syncAndSummarize(store, client, { added }));
     },
 
     async checkStatus(): Promise<Content> {
@@ -142,6 +144,23 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       if (!result.ok) return json(result);
       return json({ ok: true, cartSize: store.size });
     },
+  };
+}
+
+// Structural no-throw boundary: ramiLevyToolHandlers itself is left
+// unwrapped (so tests exercise real behaviour), but every handler the SDK
+// actually calls is wrapped once here, so a thrown error becomes the same
+// JSON content shape the handlers already return on a known failure,
+// instead of an uncaught exception escaping across the tool boundary.
+export function withErrorBoundary<Args extends unknown[]>(
+  fn: (...args: Args) => Promise<Content>,
+): (...args: Args) => Promise<Content> {
+  return async (...args: Args): Promise<Content> => {
+    try {
+      return await fn(...args);
+    } catch (err) {
+      return json({ ok: false, reason: 'internal_error', details: err instanceof Error ? err.message : String(err) });
+    }
   };
 }
 
@@ -172,7 +191,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Search Rami Levy\'s real catalog. Returns productId, name, price for each hit. Call this before rami_levy_add_item — a productId is never invented.',
       inputSchema: { query: z.string().min(1), limit: LIMIT },
     },
-    h.searchProducts,
+    withErrorBoundary(h.searchProducts),
   );
 
   server.registerTool(
@@ -181,7 +200,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Add a product to the shared cart. productId, name, and price all come from a prior rami_levy_search_products result — never guessed, and never re-fetched (there is no "get one product" endpoint). If this product is already in the cart, qty is ADDED to what\'s there, not overwritten. Syncs the whole cart to the real Rami Levy account immediately.',
       inputSchema: { productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY },
     },
-    h.addItem,
+    withErrorBoundary(h.addItem),
   );
 
   server.registerTool(
@@ -190,7 +209,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Show everything currently in the cart, with the running total and the checkout URL. Reads local state only — no network call.',
       inputSchema: {},
     },
-    h.viewCart,
+    withErrorBoundary(h.viewCart),
   );
 
   server.registerTool(
@@ -199,7 +218,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Remove one product from the cart by productId, then re-syncs the remaining cart to the real account.',
       inputSchema: { productId: PRODUCT_ID },
     },
-    h.removeItem,
+    withErrorBoundary(h.removeItem),
   );
 
   server.registerTool(
@@ -208,7 +227,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Empty the cart completely, both locally and on the real Rami Levy account.',
       inputSchema: {},
     },
-    h.clearCart,
+    withErrorBoundary(h.clearCart),
   );
 
   server.registerTool(
@@ -217,7 +236,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Look at the last numOrders (default 10, max 50) real orders, find items that appear in at least minOccurrences (default 3) of them, and add each at its median past quantity. ADDS onto whatever is already in the cart — it does not replace it.',
       inputSchema: { numOrders: z.number().int().min(1).max(50).optional(), minOccurrences: z.number().int().min(1).optional() },
     },
-    h.reorderFromHistory,
+    withErrorBoundary(h.reorderFromHistory),
   );
 
   server.registerTool(
@@ -226,6 +245,6 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       description: 'Check whether the Rami Levy connection is working (network + auth) and report the current cart size.',
       inputSchema: {},
     },
-    h.checkStatus,
+    withErrorBoundary(h.checkStatus),
   );
 }

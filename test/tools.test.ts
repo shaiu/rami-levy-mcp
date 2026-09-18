@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { CartStore } from '../src/store.js';
-import { ramiLevyToolHandlers } from '../src/tools.js';
+import { ramiLevyToolHandlers, withErrorBoundary } from '../src/tools.js';
 import type { RamiLevyClient } from '../src/client.js';
 
 function tempStore(): CartStore {
@@ -169,4 +169,13 @@ test('checkStatus surfaces the underlying error when the probe fails', async () 
   const out = textOf(await h.checkStatus());
   assert.deepEqual(out, { ok: false, reason: 'blocked_by_cloudflare' });
   store.close();
+});
+
+test('withErrorBoundary turns a thrown error into a structured internal_error result', async () => {
+  const throwingHandler = async (_args: { productId: string }) => {
+    throw new Error('boom');
+  };
+  const wrapped = withErrorBoundary(throwingHandler);
+  const out = textOf(await wrapped({ productId: '1' }));
+  assert.deepEqual(out, { ok: false, reason: 'internal_error', details: 'boom' });
 });
