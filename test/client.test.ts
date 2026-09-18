@@ -18,6 +18,50 @@ function fakeResponse(status: number, body: unknown, headers: Record<string, str
   });
 }
 
+test('a search response echoing q:null alongside real product data is network_error, not ok', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, { q: null, data: [{ id: 1, name: 'Unrelated default listing', price: 3 }] }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.deepEqual(result, {
+    ok: false,
+    reason: 'network_error',
+    details: 'search query not applied (response q=null) — likely a request wire-format mismatch',
+  });
+});
+
+test('a search response echoing a different q is network_error', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { q: 'bread', data: [{ id: 1, name: 'Bread', price: 3 }] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.ok('details' in result && result.details.startsWith('search query not applied (response q="bread")'), JSON.stringify(result));
+});
+
+test('a search response echoing the sent q (modulo surrounding whitespace) is ok', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { q: 'milk ', data: [{ id: 1, name: 'Milk', price: 6.9 }] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts(' milk');
+  assert.deepEqual(result, { ok: true, results: [{ productId: '1', name: 'Milk', price: 6.9 }] });
+});
+
+test('searchProducts drops rows with neither id nor barcode instead of emitting productId "undefined"', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, { data: [{ name: 'No id', price: 1 }, { id: 7, name: 'Has id', price: 2 }, { barcode: 8, name: 'Has barcode', price: 3 }] }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('x', 2);
+  assert.deepEqual(result, {
+    ok: true,
+    results: [
+      { productId: '7', name: 'Has id', price: 2 },
+      { productId: '8', name: 'Has barcode', price: 3 },
+    ],
+  });
+});
+
 test('searchProducts maps the real API shape into SearchResult[]', async (t) => {
   t.mock.method(globalThis, 'fetch', async () =>
     fakeResponse(200, {

@@ -124,14 +124,37 @@ export class RamiLevyClient {
       return { ok: false, reason: 'network_error', details: `Unexpected search shape: ${JSON.stringify(result).slice(0, 200)}` };
     }
 
-    const results: SearchResult[] = result.data.slice(0, limit).map((p) => {
+    // The API echoes the query it actually applied as `q`. The spec's live
+    // probe saw HTTP 200 + real product data + `q: null` — the query was
+    // dropped and a default listing came back. Returning those unrelated
+    // products as ok:true is the worst failure class here, so a `q` echo that
+    // differs from what was sent is an error. (No `q` key at all is not.)
+    if (Object.prototype.hasOwnProperty.call(result, 'q')) {
+      const echoed = (result as { q?: unknown }).q;
+      const echoedStr = echoed == null ? '' : String(echoed);
+      if (echoedStr.trim() !== query.trim()) {
+        return {
+          ok: false,
+          reason: 'network_error',
+          details: `search query not applied (response q=${JSON.stringify(echoed)}) — likely a request wire-format mismatch`,
+        };
+      }
+    }
+
+    const results: SearchResult[] = [];
+    for (const p of result.data) {
+      if (results.length >= limit) break;
+      // A row with neither id nor barcode can't be added to the cart; handing
+      // the agent productId "undefined" would only fail later, and silently.
+      const rawId = p.id ?? p.barcode;
+      if (rawId === undefined || rawId === null || rawId === '') continue;
       const price = p.price as { price?: number } | number | undefined;
-      return {
-        productId: String(p.id ?? p.barcode),
+      results.push({
+        productId: String(rawId),
         name: (p.name as string) || (p.he as { name?: string } | undefined)?.name || (p.product_name as string) || '',
         price: typeof price === 'object' ? price?.price ?? 0 : price ?? 0,
-      };
-    });
+      });
+    }
     return { ok: true, results };
   }
 
