@@ -1,0 +1,32 @@
+{
+  "name": "rami-levy-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for shopping at Rami Levy (rami-levy.co.il) via an LLM agent",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "rami-levy-mcp": "dist/index.js"
+  },
+  "engines": {
+    "node": ">=22.13"
+  },
+  "files": [
+    "dist",
+    "plugin.json",
+    "mcp.json"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "test": "node --import tsx --test \"test/**/*.test.ts\"",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0",
+    "tsx": "^4.16.0",
+    "@types/node": "^22.13.0"
+  }
+}

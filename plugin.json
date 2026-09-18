@@ -1,0 +1,8 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "rami-levy-mcp",
+  "version": "0.1.0",
+  "description": "Search Rami Levy, manage a shared cart, and reorder from purchase history",
+  "repository": "https://github.com/shaiu/rami-levy-mcp",
+  "license": "MIT"
+}

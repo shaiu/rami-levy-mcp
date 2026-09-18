@@ -1,0 +1,19 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "rami-levy": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["${PLUGIN_ROOT}/dist/index.js"],
+      "cwd": "${PLUGIN_DATA}/rami-levy",
+      "env": {
+        "RAMI_LEVY_BEARER_TOKEN": "placeholder",
+        "RAMI_LEVY_ECOM_TOKEN": "placeholder",
+        "RAMI_LEVY_COOKIE": "placeholder",
+        "RAMI_LEVY_USER_AGENT": "placeholder",
+        "RAMI_LEVY_STORE": "412",
+        "RAMI_LEVY_DB_PATH": "${PLUGIN_DATA}/rami-levy/cart.db"
+      }
+    }
+  }
+}
