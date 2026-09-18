@@ -115,14 +115,16 @@ export class RamiLevyClient {
     });
     if (!result.ok) return result;
 
-    // Missing `data` reads as "no results" (a valid, common shape); `data`
-    // present but not an array is an unexpected shape we can't safely map
-    // over, so it's a network_error rather than a thrown TypeError.
-    if (result.data !== undefined && !Array.isArray(result.data)) {
+    // A genuine no-match response from the real API carries `data: []`.
+    // Anything that isn't an array — including a missing `data` key — means
+    // the API shape changed or the request was misread; reporting that as
+    // "no products found" would be a success that did nothing, so it's a
+    // network_error instead, never a thrown TypeError out of .slice()/.map().
+    if (!Array.isArray(result.data)) {
       return { ok: false, reason: 'network_error', details: `Unexpected search shape: ${JSON.stringify(result).slice(0, 200)}` };
     }
 
-    const results: SearchResult[] = (result.data || []).slice(0, limit).map((p) => {
+    const results: SearchResult[] = result.data.slice(0, limit).map((p) => {
       const price = p.price as { price?: number } | number | undefined;
       return {
         productId: String(p.id ?? p.barcode),

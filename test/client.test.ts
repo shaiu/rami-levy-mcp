@@ -37,8 +37,18 @@ test('searchProducts maps the real API shape into SearchResult[]', async (t) => 
   ]);
 });
 
-test('an unexpected search response shape is classified as network_error, not thrown', async (t) => {
+test('an unexpected search response shape (non-array data) is classified as network_error, not thrown', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { data: { foo: 1 } }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, 'network_error');
+  assert.ok('details' in result && result.details.startsWith('Unexpected search shape'), `unexpected details: ${JSON.stringify(result)}`);
+});
+
+test('a search response with no data key at all is classified as network_error, not "no results found"', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { q: null }));
   const client = new RamiLevyClient(CONFIG);
   const result = await client.searchProducts('milk');
   assert.equal(result.ok, false);
