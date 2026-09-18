@@ -281,3 +281,28 @@ test('getOrderDetail URL-encodes the order id', async (t) => {
   await client.getOrderDetail('a/b c');
   assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/a%2Fb%20c');
 });
+
+test('getOrderDetail accepts a numeric order id (the real API returns OrderSummary.id as a number)', async (t) => {
+  const calls = captureFetch(t, () =>
+    fakeResponse(200, { data: { id: 12345, lines: [{ item_id: 1, name: 'Milk', quantity: 2, price: '6.90' }] } }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.getOrderDetail(12345);
+  assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/12345');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.data, { id: 12345, lines: [{ item_id: 1, name: 'Milk', quantity: 2, price: '6.90' }] });
+});
+
+test('getOrderList parses a numeric OrderSummary.id and a numeric OrderLine.quantity', async (t) => {
+  captureFetch(t, () =>
+    fakeResponse(200, {
+      data: { data: { current_page: 1, last_page: 1, total: 1, data: [{ id: 999, created_at: '2026-09-08 10:00:00' }] } },
+    }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.getOrderList(1);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.data.orders, [{ id: 999, created_at: '2026-09-08 10:00:00' }]);
+});

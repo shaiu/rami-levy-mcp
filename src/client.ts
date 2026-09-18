@@ -13,7 +13,8 @@ export interface SearchResult {
 }
 
 export interface OrderSummary {
-  id: string;
+  // Measured live (2026-09-18): the real API returns this as a number.
+  id: string | number;
   created_at: string;
 }
 
@@ -27,7 +28,11 @@ export interface OrderListResult {
 export interface OrderLine {
   item_id: string | number;
   name: string;
-  quantity: string;
+  // Measured live (2026-09-18): the real API returns this as a number.
+  quantity: string | number;
+  // Measured live (2026-09-18): present as a string on current orders, but
+  // older order data may lack it entirely.
+  price?: string;
 }
 
 export interface OrderDetail {
@@ -218,8 +223,8 @@ export class RamiLevyClient {
     };
   }
 
-  async getOrderDetail(orderId: string): Promise<ClientResult<{ data: OrderDetail }>> {
-    const result = await this.request<{ data?: OrderDetail }>(`${ORDERS_URL}/${encodeURIComponent(orderId)}`, {
+  async getOrderDetail(orderId: string | number): Promise<ClientResult<{ data: OrderDetail }>> {
+    const result = await this.request<{ data?: OrderDetail }>(`${ORDERS_URL}/${encodeURIComponent(String(orderId))}`, {
       method: 'GET',
       headers: this.headers(),
     });

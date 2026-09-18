@@ -232,6 +232,131 @@ test('reorderFromHistory increments an existing item rather than replacing the c
   store.close();
 });
 
+test('reorderFromHistory prices a newly reordered item from the most recent order line, not 0', async () => {
+  const store = tempStore();
+
+  const client = fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: {
+        orders: [
+          { id: 'o1', created_at: '2026-09-01 10:00:00' },
+          { id: 'o2', created_at: '2026-09-08 10:00:00' },
+        ],
+        currentPage: 1,
+        lastPage: 1,
+        total: 2,
+      },
+    }),
+    getOrderDetail: async (id: string) => {
+      // o2 (2026-09-08) is more recent than o1 (2026-09-01); its price
+      // (7.50) must win over o1's stale price (6.90).
+      const price = id === 'o2' ? '7.50' : '6.90';
+      return { ok: true, data: { id, lines: [{ item_id: '1', name: 'Milk', quantity: '2.00', price }] } };
+    },
+    syncCart: async (items: Record<string, string>) => acceptAll(items, 15),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 2 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 7.5, qty: 2 }]);
+  store.close();
+});
+
+test('reorderFromHistory falls back to the existing cart price when no order line has a finite price', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 5.25, 1); // already in cart at this price
+
+  const client = fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: { orders: [{ id: 'o1', created_at: '2026-09-01' }, { id: 'o2', created_at: '2026-09-08' }], currentPage: 1, lastPage: 1, total: 2 },
+    }),
+    getOrderDetail: async (id: string) => ({
+      ok: true,
+      // No `price` field at all, and a non-numeric one on the other order.
+      data: { id, lines: [{ item_id: '1', name: 'Milk', quantity: '2.00', price: id === 'o1' ? 'N/A' : undefined }] },
+    }),
+    syncCart: async (items: Record<string, string>) => acceptAll(items, 15.75),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 2 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 5.25, qty: 3 }]);
+  store.close();
+});
+
+test('reorderFromHistory falls back to 0 when there is no order-line price and nothing already in the cart', async () => {
+  const store = tempStore();
+
+  const client = fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: { orders: [{ id: 'o1', created_at: '2026-09-01' }, { id: 'o2', created_at: '2026-09-08' }], currentPage: 1, lastPage: 1, total: 2 },
+    }),
+    getOrderDetail: async (id: string) => ({
+      ok: true,
+      data: { id, lines: [{ item_id: '1', name: 'Milk', quantity: '2.00' }] },
+    }),
+    syncCart: async (items: Record<string, string>) => acceptAll(items, 0),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 2 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 0, qty: 2 }]);
+  store.close();
+});
+
+test('reorderFromHistory handles numeric item_id, quantity, and order id from the real API', async () => {
+  const store = tempStore();
+
+  const client = fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: {
+        orders: [
+          { id: 101, created_at: '2026-09-01 10:00:00' },
+          { id: 102, created_at: '2026-09-08 10:00:00' },
+        ],
+        currentPage: 1,
+        lastPage: 1,
+        total: 2,
+      },
+    }),
+    getOrderDetail: async (id: number) => ({
+      ok: true,
+      data: { id, lines: [{ item_id: 456813, name: 'חלב', quantity: 2, price: '6.90' }] },
+    }),
+    syncCart: async (items: Record<string, string>) => acceptAll(items, 13.8),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 2 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.deepEqual(store.getItems(), [{ productId: '456813', name: 'חלב', price: 6.9, qty: 2 }]);
+  store.close();
+});
+
+test('reorderFromHistory skips a line whose quantity is not a positive finite number', async () => {
+  const store = tempStore();
+
+  const client = fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: { orders: [{ id: 'o1', created_at: '2026-09-01' }, { id: 'o2', created_at: '2026-09-08' }], currentPage: 1, lastPage: 1, total: 2 },
+    }),
+    getOrderDetail: async (id: string) => ({
+      ok: true,
+      data: { id, lines: [{ item_id: '1', name: 'Milk', quantity: id === 'o1' ? 'not-a-number' : '0', price: '6.90' }] },
+    }),
+    syncCart: async () => acceptAll({}, 0),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 1 })) as { ok: boolean; added: unknown[] };
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.added, []);
+  store.close();
+});
+
 test('reorderFromHistory with a failing sync leaves the local cart unchanged', async () => {
   const store = tempStore();
   store.addItem('1', 'Milk', 6.9, 1);
