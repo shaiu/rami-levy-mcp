@@ -1,7 +1,11 @@
 export interface RamiLevyConfig {
   bearerToken: string;
   ecomToken: string;
-  cookie: string;
+  // Measured live (2026-09-18, Israeli residential IP): the browser sent no
+  // cookie at all to www-api or www, and the orders/search requests still
+  // returned 200. A cookie only matters once Cloudflare starts challenging
+  // the egress IP (then it's cf_clearance that's needed), so it's optional.
+  cookie?: string;
   userAgent: string;
   store: string;
 }
@@ -61,7 +65,8 @@ export class RamiLevyClient {
       origin: 'https://www.rami-levy.co.il',
       referer: 'https://www.rami-levy.co.il/',
       ecomtoken: this.config.ecomToken,
-      cookie: this.config.cookie,
+      // Only sent when configured — see the RamiLevyConfig.cookie comment.
+      ...(this.config.cookie ? { cookie: this.config.cookie } : {}),
       'user-agent': this.config.userAgent,
       authorization: `Bearer ${this.config.bearerToken}`,
       ...extra,

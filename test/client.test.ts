@@ -38,6 +38,24 @@ function assertAuthHeaders(init: RequestInit): void {
   assert.equal(h['user-agent'], 'test-agent');
 }
 
+test('the client omits the cookie header when no cookie is configured', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
+  const client = new RamiLevyClient({ ...CONFIG, cookie: undefined });
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, true);
+  const h = calls[0].init.headers as Record<string, string>;
+  assert.equal('cookie' in h, false, JSON.stringify(h));
+});
+
+test('the client sends the cookie header when a cookie is configured', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, true);
+  const h = calls[0].init.headers as Record<string, string>;
+  assert.equal(h.cookie, 'test-cookie');
+});
+
 test('searchProducts POSTs {q, store} as JSON to /api/catalog with the full auth bundle', async (t) => {
   const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
   const client = new RamiLevyClient(CONFIG);

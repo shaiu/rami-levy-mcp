@@ -9,7 +9,6 @@
       "env": {
         "RAMI_LEVY_BEARER_TOKEN": "placeholder",
         "RAMI_LEVY_ECOM_TOKEN": "placeholder",
-        "RAMI_LEVY_COOKIE": "placeholder",
         "RAMI_LEVY_USER_AGENT": "placeholder",
         "RAMI_LEVY_STORE": "412",
         "RAMI_LEVY_DB_PATH": "${PLUGIN_DATA}/rami-levy/cart.db"
