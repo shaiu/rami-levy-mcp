@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { DatabaseSync } from 'node:sqlite';
 import { CartStore } from '../src/store.js';
 
 function tempDbPath(): string {
@@ -92,5 +93,33 @@ test('snapshot + replaceAll restores an earlier cart exactly', () => {
   assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 2 }]);
   store.replaceAll([]);
   assert.deepEqual(store.getItems(), []);
+  store.close();
+});
+
+test('last_synced_at is null until set, then persists across reopening', () => {
+  const dbPath = tempDbPath();
+  const first = new CartStore(dbPath);
+  assert.equal(first.getLastSyncedAt(), null);
+  first.setLastSyncedAt('2026-09-18T07:00:00.000Z');
+  first.setLastSyncedAt('2026-09-18T08:00:00.000Z');
+  first.close();
+  const reopened = new CartStore(dbPath);
+  assert.equal(reopened.getLastSyncedAt(), '2026-09-18T08:00:00.000Z');
+  reopened.close();
+});
+
+test('a DB created before the meta table existed upgrades cleanly and keeps its cart', () => {
+  const dbPath = tempDbPath();
+  // The exact v0.1.0 schema: cart_items only, no meta table.
+  const old = new DatabaseSync(dbPath);
+  old.exec('CREATE TABLE cart_items (product_id TEXT PRIMARY KEY, name TEXT NOT NULL, price REAL NOT NULL, qty REAL NOT NULL)');
+  old.prepare('INSERT INTO cart_items VALUES (?, ?, ?, ?)').run('1', 'Milk', 6.9, 2);
+  old.close();
+
+  const store = new CartStore(dbPath);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 2 }]);
+  assert.equal(store.getLastSyncedAt(), null);
+  store.setLastSyncedAt('2026-09-18T07:00:00.000Z');
+  assert.equal(store.getLastSyncedAt(), '2026-09-18T07:00:00.000Z');
   store.close();
 });

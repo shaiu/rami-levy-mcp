@@ -69,7 +69,13 @@ test('server starts, lists the registered tools, and view_cart works end to end 
 
     const result = await client.callTool({ name: 'rami_levy_view_cart', arguments: {} });
     const out = textOf(result as { content: { type: 'text'; text: string }[] });
-    assert.deepEqual(out, { ok: true, items: [], total: 0, checkoutUrl: 'https://www.rami-levy.co.il/he/dashboard/checkout' });
+    assert.deepEqual(out, {
+      ok: true,
+      items: [],
+      total: 0,
+      scope: 'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: the API has no way to read the cart back.',
+      checkoutUrl: 'https://www.rami-levy.co.il/he/dashboard/checkout',
+    });
   } finally {
     await client.close();
   }
