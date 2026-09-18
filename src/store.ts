@@ -74,6 +74,25 @@ export class CartStore {
     return row.total;
   }
 
+  // snapshot()/replaceAll() let a tool undo its local change when the sync
+  // that was meant to mirror it fails, so ok:false means nothing changed.
+  snapshot(): CartItem[] {
+    return this.getItems();
+  }
+
+  replaceAll(items: CartItem[]): void {
+    this.db.exec('BEGIN');
+    try {
+      this.db.exec('DELETE FROM cart_items');
+      const insert = this.db.prepare('INSERT INTO cart_items (product_id, name, price, qty) VALUES (?, ?, ?, ?)');
+      for (const item of items) insert.run(item.productId, item.name, item.price, item.qty);
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
+  }
+
   get size(): number {
     const row = this.db.prepare('SELECT COUNT(*) as n FROM cart_items').get() as { n: number };
     return row.n;

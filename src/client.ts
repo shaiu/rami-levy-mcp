@@ -158,16 +158,42 @@ export class RamiLevyClient {
     return { ok: true, results };
   }
 
-  async syncCart(items: Record<string, string>): Promise<ClientResult<Record<string, never>>> {
+  // Response shape, derived from the bot this replaces (not yet measured
+  // live): whatsapp-baileys-api/rami-levy-client.js:111-112 unwrapped the n8n
+  // proxy's single `{ok, data: <real body>}` layer (`data.data || data`), and
+  // message-handler.js:317-319 then read `synced.items` (an array — it used
+  // `.length`) and `synced.price` (the cart total). So the real body carries
+  // `items` and `price` at the top level. The server decides what it accepts,
+  // so the caller diffs acceptedIds against what it sent.
+  async syncCart(items: Record<string, string>): Promise<ClientResult<{ acceptedIds: string[]; serverTotal: number | null }>> {
     const supplyAt = new Date();
     supplyAt.setDate(supplyAt.getDate() + 1);
     supplyAt.setHours(0, 0, 0, 0);
 
-    return this.request(CART_URL, {
+    const result = await this.request<{ items?: unknown; price?: unknown }>(CART_URL, {
       method: 'POST',
       headers: this.headers({ 'content-type': 'application/json;charset=UTF-8' }),
       body: JSON.stringify({ store: this.config.store, isClub: 0, supplyAt: supplyAt.toISOString(), items, meta: null }),
     });
+    if (!result.ok) return result;
+
+    const shapeError: ClientError = {
+      ok: false,
+      reason: 'network_error',
+      details: `Unexpected cart response shape: ${JSON.stringify(result).slice(0, 200)}`,
+    };
+    if (!Array.isArray(result.items)) return shapeError;
+
+    const acceptedIds: string[] = [];
+    for (const entry of result.items) {
+      const ids = cartEntryIds(entry);
+      if (ids.length === 0) return shapeError;
+      acceptedIds.push(...ids);
+    }
+
+    const price = typeof result.price === 'string' ? Number(result.price) : result.price;
+    const serverTotal = typeof price === 'number' && Number.isFinite(price) ? price : null;
+    return { ok: true, acceptedIds, serverTotal };
   }
 
   async getOrderList(page = 1): Promise<ClientResult<{ data: OrderListResult }>> {
@@ -204,4 +230,19 @@ export class RamiLevyClient {
     }
     return { ok: true, data: result.data };
   }
+}
+
+// Which field of a cart-response item carries the product id is unverified
+// (the bot only ever counted them), so every plausible id field is collected:
+// a product counts as accepted if any of them matches what was sent. An item
+// exposing none of them is an unrecognized shape, never a silent pass.
+function cartEntryIds(entry: unknown): string[] {
+  if (typeof entry === 'string' || typeof entry === 'number') return [String(entry)];
+  if (!entry || typeof entry !== 'object') return [];
+  const ids: string[] = [];
+  for (const key of ['id', 'item_id', 'product_id'] as const) {
+    const v = (entry as Record<string, unknown>)[key];
+    if (typeof v === 'string' || typeof v === 'number') ids.push(String(v));
+  }
+  return ids;
 }

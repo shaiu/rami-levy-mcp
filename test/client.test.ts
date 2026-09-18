@@ -18,6 +18,39 @@ function fakeResponse(status: number, body: unknown, headers: Record<string, str
   });
 }
 
+type Captured = { url: string; init: RequestInit };
+
+// Mocks fetch to return `response` and records every call's (url, init).
+function captureFetch(t: { mock: { method: Function } }, response: () => Response): Captured[] {
+  const calls: Captured[] = [];
+  t.mock.method(globalThis, 'fetch', async (url: string, init: RequestInit) => {
+    calls.push({ url, init });
+    return response();
+  });
+  return calls;
+}
+
+function assertAuthHeaders(init: RequestInit): void {
+  const h = init.headers as Record<string, string>;
+  assert.equal(h.authorization, 'Bearer test-bearer');
+  assert.equal(h.ecomtoken, 'test-ecom');
+  assert.equal(h.cookie, 'test-cookie');
+  assert.equal(h['user-agent'], 'test-agent');
+}
+
+test('searchProducts POSTs {q, store} as JSON to /api/catalog with the full auth bundle', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].url, 'https://www.rami-levy.co.il/api/catalog');
+  assert.equal(calls[0].init.method, 'POST');
+  assertAuthHeaders(calls[0].init);
+  assert.equal((calls[0].init.headers as Record<string, string>)['content-type'], 'application/json;charset=UTF-8');
+  assert.deepEqual(JSON.parse(calls[0].init.body as string), { q: 'milk', store: '412' });
+});
+
 test('a search response echoing q:null alongside real product data is network_error, not ok', async (t) => {
   t.mock.method(globalThis, 'fetch', async () =>
     fakeResponse(200, { q: null, data: [{ id: 1, name: 'Unrelated default listing', price: 3 }] }),
@@ -150,22 +183,56 @@ test('fetch throwing (network down) is classified as network_error', async (t) =
   assert.deepEqual(result, { ok: false, reason: 'network_error', details: 'ECONNREFUSED' });
 });
 
-test('syncCart posts the full item map and reports ok on success', async (t) => {
-  let capturedBody = '';
-  t.mock.method(globalThis, 'fetch', async (_url: string, init: RequestInit) => {
-    capturedBody = init.body as string;
-    return fakeResponse(200, { success: true });
-  });
+test('syncCart POSTs the full item map to /api/v2/cart and returns the accepted ids and server total', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { items: [{ id: 1, quantity: '2.00' }, { id: '2', quantity: '1.00' }], price: 21.4 }));
   const client = new RamiLevyClient(CONFIG);
   const result = await client.syncCart({ '1': '2.00', '2': '1.00' });
-  assert.equal(result.ok, true);
-  const sent = JSON.parse(capturedBody);
+  assert.deepEqual(result, { ok: true, acceptedIds: ['1', '2'], serverTotal: 21.4 });
+  assert.equal(calls[0].url, 'https://www.rami-levy.co.il/api/v2/cart');
+  assert.equal(calls[0].init.method, 'POST');
+  assertAuthHeaders(calls[0].init);
+  const sent = JSON.parse(calls[0].init.body as string);
   assert.deepEqual(sent.items, { '1': '2.00', '2': '1.00' });
   assert.equal(sent.store, '412');
+  assert.equal(sent.isClub, 0);
+  assert.equal(sent.meta, null);
+});
+
+test('syncCart reports only what the server kept, so the caller can see a rejection', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ item_id: 1 }], price: '13.80' }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.syncCart({ '1': '2.00', '2': '1.00' });
+  assert.deepEqual(result, { ok: true, acceptedIds: ['1'], serverTotal: 13.8 });
+});
+
+test('syncCart of an empty cart accepts an empty items array', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [], price: 0 }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.syncCart({});
+  assert.deepEqual(result, { ok: true, acceptedIds: [], serverTotal: 0 });
+});
+
+test('syncCart with no price in the response reports serverTotal null, not 0', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ id: 1 }] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.syncCart({ '1': '1.00' });
+  assert.deepEqual(result, { ok: true, acceptedIds: ['1'], serverTotal: null });
+});
+
+test('an unrecognized cart response shape is network_error, not ok', async (t) => {
+  for (const body of [{ success: true }, { data: { items: [] } }, { items: [{ name: 'no id field' }] }, { items: { 1: '2.00' } }]) {
+    t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, body));
+    const client = new RamiLevyClient(CONFIG);
+    const result = await client.syncCart({ '1': '2.00' });
+    assert.equal(result.ok, false, JSON.stringify(body));
+    if (result.ok) return;
+    assert.equal(result.reason, 'network_error');
+    assert.ok('details' in result && result.details.startsWith('Unexpected cart response shape'), JSON.stringify(result));
+  }
 });
 
 test('getOrderList parses the doubly-nested paginator shape', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () =>
+  const calls = captureFetch(t, () =>
     fakeResponse(200, {
       data: {
         data: {
@@ -178,7 +245,10 @@ test('getOrderList parses the doubly-nested paginator shape', async (t) => {
     }),
   );
   const client = new RamiLevyClient(CONFIG);
-  const result = await client.getOrderList(1);
+  const result = await client.getOrderList(2);
+  assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders?page=2&activeFilter=0');
+  assert.equal(calls[0].init.method, 'GET');
+  assertAuthHeaders(calls[0].init);
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.deepEqual(result.data, {
@@ -190,14 +260,24 @@ test('getOrderList parses the doubly-nested paginator shape', async (t) => {
 });
 
 test('getOrderDetail parses the singly-nested order shape', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () =>
+  const calls = captureFetch(t, () =>
     fakeResponse(200, {
       data: { id: 'o1', lines: [{ item_id: 456813, name: 'חלב', quantity: '2.00' }] },
     }),
   );
   const client = new RamiLevyClient(CONFIG);
   const result = await client.getOrderDetail('o1');
+  assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/o1');
+  assert.equal(calls[0].init.method, 'GET');
+  assertAuthHeaders(calls[0].init);
   assert.equal(result.ok, true);
   if (!result.ok) return;
   assert.deepEqual(result.data, { id: 'o1', lines: [{ item_id: 456813, name: 'חלב', quantity: '2.00' }] });
+});
+
+test('getOrderDetail URL-encodes the order id', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { data: { id: 'a/b c', lines: [] } }));
+  const client = new RamiLevyClient(CONFIG);
+  await client.getOrderDetail('a/b c');
+  assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/a%2Fb%20c');
 });

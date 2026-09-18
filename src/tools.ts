@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CartStore } from './store.js';
-import type { RamiLevyClient, ClientResult } from './client.js';
+import type { RamiLevyClient } from './client.js';
 
 type Content = { content: { type: 'text'; text: string }[] };
 const json = (v: unknown): Content => ({ content: [{ type: 'text', text: JSON.stringify(v, null, 2) }] });
@@ -16,26 +16,63 @@ function cartPayload(store: CartStore): Record<string, string> {
   return payload;
 }
 
-async function syncAndReport(store: CartStore, client: RamiLevyClient): Promise<ClientResult<Record<string, never>>> {
-  return client.syncCart(cartPayload(store));
-}
-
-// Syncs the full cart and folds the result into the {ok/reason..., ...extra,
-// cartTotal, itemCount} shape shared by addItem, removeItem, and
-// reorderFromHistory — the only difference between call sites is `extra`
-// (e.g. reorderFromHistory's `added` list).
-async function syncAndSummarize(
+// The one path every cart-mutating tool goes through. It applies `mutate`
+// locally, syncs the whole cart (the real /v2/cart is full-replace), and folds
+// the outcome into {ok/reason..., ...extra, cartTotal, itemCount, serverTotal}.
+//
+// - Transport failure (auth_expired / blocked_by_cloudflare / network_error),
+//   or a throw: the local cart is restored to its pre-mutation snapshot, so
+//   ok:false means nothing changed and a retry can't double-add.
+// - The server dropped some sent products: they're removed locally too (local
+//   mirrors the real cart) and the result is items_rejected, never ok:true.
+// - An empty sync (clear) is accepted only if the server reports an empty cart.
+async function mutateAndSync(
   store: CartStore,
   client: RamiLevyClient,
+  mutate: () => void,
   extra: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
-  const sync = await syncAndReport(store, client);
-  return {
-    ...(sync.ok ? { ok: true } : sync),
-    ...extra,
-    cartTotal: store.getTotal(),
-    itemCount: store.size,
-  };
+  const before = store.snapshot();
+  let sync: Awaited<ReturnType<RamiLevyClient['syncCart']>>;
+  let payload: Record<string, string>;
+  try {
+    mutate();
+    payload = cartPayload(store);
+    sync = await client.syncCart(payload);
+  } catch (err) {
+    store.replaceAll(before);
+    throw err;
+  }
+
+  const totals = (serverTotal: number | null) => ({ cartTotal: store.getTotal(), itemCount: store.size, serverTotal });
+
+  if (!sync.ok) {
+    store.replaceAll(before);
+    return { ...sync, ...totals(null) };
+  }
+
+  const sentIds = Object.keys(payload);
+  if (sentIds.length === 0 && sync.acceptedIds.length > 0) {
+    store.replaceAll(before);
+    return {
+      ok: false,
+      reason: 'network_error',
+      details: `cart not emptied: server still holds ${JSON.stringify(sync.acceptedIds).slice(0, 200)}`,
+      ...totals(sync.serverTotal),
+    };
+  }
+
+  const accepted = new Set(sync.acceptedIds);
+  const rejected = store
+    .getItems()
+    .filter((item) => !accepted.has(item.productId))
+    .map((item) => ({ productId: item.productId, name: item.name }));
+  if (rejected.length > 0) {
+    for (const r of rejected) store.removeItem(r.productId);
+    return { ok: false, reason: 'items_rejected', rejected, ...extra, ...totals(sync.serverTotal) };
+  }
+
+  return { ok: true, ...extra, ...totals(sync.serverTotal) };
 }
 
 export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
@@ -47,8 +84,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
 
     async addItem(args: { productId: string; name: string; price: number; qty?: number }): Promise<Content> {
       const qty = args.qty ?? 1;
-      store.addItem(args.productId, args.name, args.price, qty);
-      return json(await syncAndSummarize(store, client));
+      return json(await mutateAndSync(store, client, () => store.addItem(args.productId, args.name, args.price, qty)));
     },
 
     async viewCart(): Promise<Content> {
@@ -64,17 +100,15 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       // Controller ruling: removing a productId that isn't in the cart is
       // not a no-op success — it must say so and must never sync (nothing
       // changed locally, so there's nothing new to push to the account).
-      const removed = store.removeItem(args.productId);
-      if (!removed) {
+      if (!store.getItems().some((i) => i.productId === args.productId)) {
         return json({ ok: false, reason: 'not_in_cart', productId: args.productId });
       }
-      return json(await syncAndSummarize(store, client));
+      return json(await mutateAndSync(store, client, () => store.removeItem(args.productId)));
     },
 
     async clearCart(): Promise<Content> {
-      store.clear();
-      const sync = await syncAndReport(store, client); // syncs the now-empty cart to the real account
-      return json(sync.ok ? { ok: true } : sync);
+      // Syncs the now-empty cart to the real account.
+      return json(await mutateAndSync(store, client, () => store.clear()));
     },
 
     async reorderFromHistory(args: { numOrders?: number; minOccurrences?: number }): Promise<Content> {
@@ -120,13 +154,6 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         if (rec.orders.size < minOccurrences) continue;
         const sorted = [...rec.qtys].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
-        // A past order line carries no current price, and the real /cart
-        // endpoint prices server-side from productId anyway — reuse whatever
-        // price this product already has in the cart, or 0 if it's new.
-        // getTotal() under-counts a freshly-reordered item until the agent
-        // separately confirms its price via search_products.
-        const existing = store.getItems().find((i) => i.productId === id);
-        store.addItem(id, rec.name, existing?.price ?? 0, median);
         added.push({ productId: id, name: rec.name, qty: median });
       }
 
@@ -134,7 +161,18 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         return json({ ok: true, added: [], message: `No items appear in ${minOccurrences}+ of the last ${selected.length} orders` });
       }
 
-      return json(await syncAndSummarize(store, client, { added }));
+      const apply = () => {
+        for (const a of added) {
+          // A past order line carries no current price, and the real /cart
+          // endpoint prices server-side from productId anyway — reuse whatever
+          // price this product already has in the cart, or 0 if it's new.
+          // cartTotal under-counts a freshly-reordered item; serverTotal is
+          // the authoritative number.
+          const existing = store.getItems().find((i) => i.productId === a.productId);
+          store.addItem(a.productId, a.name, existing?.price ?? 0, a.qty);
+        }
+      };
+      return json(await mutateAndSync(store, client, apply, { added }));
     },
 
     async checkStatus(): Promise<Content> {
@@ -170,6 +208,11 @@ const PRICE = z.number().nonnegative();
 const QTY = z.number().positive().optional();
 const LIMIT = z.number().int().min(1).max(50).optional();
 
+const CART_SYNC_NOTE =
+  'Returns cartTotal (local estimate) and serverTotal (Rami Levy\'s own total — authoritative). ' +
+  'ok:false with a transport reason means nothing changed. reason items_rejected means the server refused the listed products; ' +
+  'they have been removed from the cart too, so tell the user and pick alternatives.';
+
 export const RAMI_LEVY_TOOL_NAMES = [
   'rami_levy_search_products',
   'rami_levy_add_item',
@@ -197,7 +240,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_add_item',
     {
-      description: 'Add a product to the shared cart. productId, name, and price all come from a prior rami_levy_search_products result — never guessed, and never re-fetched (there is no "get one product" endpoint). If this product is already in the cart, qty is ADDED to what\'s there, not overwritten. Syncs the whole cart to the real Rami Levy account immediately.',
+      description: 'Add a product to the shared cart. productId, name, and price all come from a prior rami_levy_search_products result — never guessed, and never re-fetched (there is no "get one product" endpoint). If this product is already in the cart, qty is ADDED to what\'s there, not overwritten. Syncs the whole cart to the real Rami Levy account immediately. ' + CART_SYNC_NOTE,
       inputSchema: { productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY },
     },
     withErrorBoundary(h.addItem),
@@ -215,7 +258,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_remove_item',
     {
-      description: 'Remove one product from the cart by productId, then re-syncs the remaining cart to the real account.',
+      description: 'Remove one product from the cart by productId, then re-syncs the remaining cart to the real account. ' + CART_SYNC_NOTE,
       inputSchema: { productId: PRODUCT_ID },
     },
     withErrorBoundary(h.removeItem),
@@ -224,7 +267,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_clear_cart',
     {
-      description: 'Empty the cart completely, both locally and on the real Rami Levy account.',
+      description: 'Empty the cart completely, both locally and on the real Rami Levy account. ' + CART_SYNC_NOTE,
       inputSchema: {},
     },
     withErrorBoundary(h.clearCart),
@@ -233,7 +276,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_reorder_from_history',
     {
-      description: 'Look at the last numOrders (default 10, max 50) real orders, find items that appear in at least minOccurrences (default 3) of them, and add each at its median past quantity. ADDS onto whatever is already in the cart — it does not replace it.',
+      description: 'Look at the last numOrders (default 10, max 50) real orders, find items that appear in at least minOccurrences (default 3) of them, and add each at its median past quantity. ADDS onto whatever is already in the cart — it does not replace it. ' + CART_SYNC_NOTE,
       inputSchema: { numOrders: z.number().int().min(1).max(50).optional(), minOccurrences: z.number().int().min(1).optional() },
     },
     withErrorBoundary(h.reorderFromHistory),

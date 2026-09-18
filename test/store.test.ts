@@ -81,3 +81,16 @@ test('a cart persists across reopening the same db file', () => {
   assert.deepEqual(reopened.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 1 }]);
   reopened.close();
 });
+
+test('snapshot + replaceAll restores an earlier cart exactly', () => {
+  const store = new CartStore(tempDbPath());
+  store.addItem('1', 'Milk', 6.9, 2);
+  const before = store.snapshot();
+  store.addItem('1', 'Milk', 6.9, 3);
+  store.addItem('2', 'Bread', 8.5, 1);
+  store.replaceAll(before);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 2 }]);
+  store.replaceAll([]);
+  assert.deepEqual(store.getItems(), []);
+  store.close();
+});
