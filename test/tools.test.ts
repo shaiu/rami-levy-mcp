@@ -102,6 +102,23 @@ test('addItem whose product the server rejects removes it locally and reports it
   store.close();
 });
 
+test('addItem ignores the server-added delivery-fee line in the sync response (real shape, 2026-09-18)', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    // Real syncCart output for a one-item sync: acceptedIds carries both the
+    // product's id and the delivery-fee line's id, and serverTotal (7.1) is
+    // the product total, excluding the 35.9 delivery fee.
+    syncCart: async () => ({ ok: true, acceptedIds: ['419939', '164854'], serverTotal: 7.1 }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '419939', name: 'Milk', price: 7.1, qty: 1 }));
+  assert.deepEqual(out, { ok: true, cartTotal: 7.1, itemCount: 1, serverTotal: 7.1 });
+  // The delivery line was never reported (no items_rejected, no `added`) and
+  // never stored locally — the cart holds only the product that was added.
+  assert.deepEqual(store.getItems(), [{ productId: '419939', name: 'Milk', price: 7.1, qty: 1 }]);
+  store.close();
+});
+
 test('an unrecognized cart response shape (network_error from the client) leaves the local cart unchanged', async () => {
   const store = tempStore();
   const client = fakeClient({

@@ -217,14 +217,44 @@ test('syncCart POSTs the full item map to /api/v2/cart and returns the accepted 
 });
 
 test('syncCart reports only what the server kept, so the caller can see a rejection', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ item_id: 1 }], price: '13.80' }));
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ id: 1 }], price: '13.80' }));
   const client = new RamiLevyClient(CONFIG);
   const result = await client.syncCart({ '1': '2.00', '2': '1.00' });
   assert.deepEqual(result, { ok: true, acceptedIds: ['1'], serverTotal: 13.8 });
 });
 
-test('syncCart of an empty cart accepts an empty items array', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [], price: 0 }));
+// Real response, captured live 2026-09-18 (a one-item sync): Rami Levy adds
+// its own delivery-fee line to `items` server-side, and the top-level
+// `price` is the product total only — it excludes that delivery line.
+test('syncCart parses the real response shape: a product line plus the server-added delivery-fee line', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, {
+      sales: [],
+      items: [
+        { id: 419939, name: 'Milk', price: 7.1, quantity: 1, FormatedPrice: '7.10' },
+        { id: 164854, name: 'מחיר משלוח', price: 35.9, quantity: 1 },
+      ],
+      log_id: 'abc123',
+      price: 7.1,
+      priceClub: 7.1,
+      discountClub: 0,
+      priceWallet: 7.1,
+      discountWallet: 0,
+      discount: 0,
+      quantity: 1,
+      meta: { ct: 1, ms: 2, cs: 3 },
+      status: 'ok',
+    }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.syncCart({ '419939': '1.00' });
+  assert.deepEqual(result, { ok: true, acceptedIds: ['419939', '164854'], serverTotal: 7.1 });
+});
+
+test('syncCart of an empty cart (real shape: no delivery line either) accepts an empty items array', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, { sales: [], items: [], log_id: 'abc123', price: 0, status: 'ok' }),
+  );
   const client = new RamiLevyClient(CONFIG);
   const result = await client.syncCart({});
   assert.deepEqual(result, { ok: true, acceptedIds: [], serverTotal: 0 });
