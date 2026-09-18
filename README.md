@@ -25,26 +25,30 @@ npm ci && npm run build
 
 ## What you need to configure
 
-Four required, two optional:
+Three required, three optional:
 
 | Env var | What it is |
 |---|---|
 | `RAMI_LEVY_BEARER_TOKEN` | The `Authorization: Bearer` token from a logged-in browser session |
 | `RAMI_LEVY_ECOM_TOKEN` | A separate JWT, sent as the `ecomtoken` header |
-| `RAMI_LEVY_COOKIE` | The full cookie string, including Cloudflare's `cf_clearance` |
 | `RAMI_LEVY_USER_AGENT` | Must match whatever browser the above were captured from |
-| `RAMI_LEVY_STORE` | Store id (default `412`) |
-| `RAMI_LEVY_DB_PATH` | Where the cart's SQLite file lives (default `./cart.db`) |
+| `RAMI_LEVY_COOKIE` *(optional)* | The full cookie string. Measured live (2026-09-18) from an Israeli residential IP: neither the orders API (`www-api`) nor search (`www`) needed a cookie at all — bearer + ecomtoken + user-agent were enough. It only helps once Cloudflare starts challenging your egress; in that case, include at least `cf_clearance`. |
+| `RAMI_LEVY_STORE` *(optional)* | Store id (default `412`) |
+| `RAMI_LEVY_DB_PATH` *(optional)* | Where the cart's SQLite file lives (default `./cart.db`) |
 
-**Capturing the bundle:** log into rami-levy.co.il in a real browser, open
-DevTools → Network, search for any product, click the `/api/catalog`
-request, and copy `Authorization`, `ecomtoken`, and `Cookie` from its request
-headers, plus the browser's own User-Agent.
+**Capturing the bundle:** log into rami-levy.co.il in a real browser, go to
+`/he/dashboard/orders`, open DevTools → Network, find the request to
+`www-api.rami-levy.co.il/api/v3/site/orders`, right-click it → Copy → Copy as
+cURL, and pull `Authorization`, `ecomtoken`, and `User-Agent` out of the
+copied headers. That single request carries everything needed — no separate
+capture of the catalog search is required. Only add `RAMI_LEVY_COOKIE` if you
+later see `blocked_by_cloudflare` and need to supply `cf_clearance`.
 
-**These expire.** `cf_clearance` in particular is a short-lived anti-bot
-cookie (hours to a few days). An expired session shows up as `auth_expired`;
-an expired `cf_clearance` most likely shows up as `blocked_by_cloudflare`
-(a challenge page). Either way, repeat the capture above first.
+**These expire.** An expired bearer/ecom session shows up as `auth_expired`.
+If you do supply a cookie with `cf_clearance`, that's a short-lived anti-bot
+cookie (hours to a few days) and an expired one most likely shows up as
+`blocked_by_cloudflare` (a challenge page). Either way, repeat the capture
+above first.
 
 ## The 7 tools
 
@@ -55,8 +59,10 @@ an expired `cf_clearance` most likely shows up as `blocked_by_cloudflare`
 - `rami_levy_clear_cart()`
 - `rami_levy_reorder_from_history(numOrders?, minOccurrences?)` — adds onto
   whatever is already in the cart, it does not replace it. A newly reordered
-  product is stored at price 0 (a past order line carries no current price),
-  so the local `cartTotal` under-counts it; `serverTotal` is right.
+  product is priced at the last price paid — the price from the most recent
+  order line that carried it — which may differ from today's price. `view_cart`'s
+  `total` is therefore only an estimate until the cart is synced; `serverTotal`
+  (returned by every cart-mutating tool) is the authoritative number.
 - `rami_levy_check_status()` — probes both the catalog search and page 1 of
   the order history (which needs the logged-in session); returns the first
   failure, else `{ ok: true, cartSize }`.
@@ -84,22 +90,21 @@ Reasons and what to do about each:
 | `invalid_args` | `reorder_from_history`'s `numOrders`/`minOccurrences` were out of bounds | Pass `numOrders` 1–50 and `minOccurrences` between 1 and `numOrders` |
 | `internal_error` | An unexpected exception was caught at the tool boundary | Inspect the `details` field; likely a bug worth reporting |
 
-## Unverified against the live API
+## Verified against the live API
 
-These were inferred from the old n8n-proxied bot, not measured directly. If
-any is wrong, the tools fail with `network_error` and an explicit message,
-never a silent success:
-
-- **Search wire format.** `{q, store}` is sent as a JSON body. An early probe
-  got `200` with product data but `"q": null`, meaning the query was
-  ignored; `search_products` now reports that as `search query not applied`.
-- **Order response nesting.** The list paginator is read at `data.data`, an
-  order's lines at `data.lines` (`Unexpected order list/detail shape`).
-- **Cart sync response.** Accepted items are read from a top-level `items`
-  array (ids from `id` / `item_id` / `product_id`) and the total from `price`
-  (`Unexpected cart response shape`).
+Search wire format, order response nesting, and the cart sync response were
+all **verified against the real API on 2026-09-18** with fresh logged-in
+captures from an Israeli IP, and match what the client parses. One thing to
+know about the cart response: Rami Levy adds its own delivery-fee line to
+`items` server-side (e.g. `{id, name: "מחיר משלוח", price, quantity}`); this
+tool ignores it (it's never matched to a local cart product), and the
+top-level `price` — surfaced as `serverTotal` — excludes it, so `serverTotal`
+is the product total only, not what checkout will actually charge.
 
 ## Manual smoke test (not part of automated tests — needs a real, live bundle)
+
+`RAMI_LEVY_COOKIE` is optional (see above) — leave it unset and the `Cookie`
+header below is just empty, which the real API accepts fine.
 
 ```bash
 curl -s -X POST "https://www.rami-levy.co.il/api/catalog" \
