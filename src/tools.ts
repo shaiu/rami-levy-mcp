@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CartStore } from './store.js';
-import type { RamiLevyClient } from './client.js';
+import type { ClientError, RamiLevyClient } from './client.js';
+import { jerusalemLocalToUtcMs } from './time.js';
 
 type Content = { content: { type: 'text'; text: string }[] };
 const json = (v: unknown): Content => ({ content: [{ type: 'text', text: JSON.stringify(v, null, 2) }] });
@@ -16,10 +17,69 @@ function cartPayload(store: CartStore): Record<string, string> {
   return payload;
 }
 
-// The one path every cart-mutating tool goes through. It applies `mutate`
-// locally, syncs the whole cart (the real /v2/cart is full-replace), and folds
-// the outcome into {ok/reason..., ...extra, cartTotal, itemCount, serverTotal}.
+const VIEW_CART_SCOPE =
+  'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: ' +
+  'the API has no way to read the cart back.';
+
+export interface ResetAfterOrder {
+  orderId: string | number;
+  createdAt: string;
+}
+
+// Rami Levy has no cart-read endpoint, so the local cart can't see a checkout
+// made on the website. After one, the site's cart is empty but the local cart
+// still holds everything that was bought, and the next full-replace sync would
+// put the whole order back. This finds that case: an order created after the
+// last successful sync means the local items were bought.
 //
+// - Empty local cart, or no sync ever recorded (a DB from before this check
+//   existed): nothing to detect, and no network call.
+// - Order-list failure: returned as-is, and the caller must not mutate. A
+//   check that can't run is never treated as "no new order".
+// - Comparison: last_synced_at is a UTC instant; created_at is naive Israel
+//   time, converted to a UTC instant with the real Asia/Jerusalem rules (see
+//   time.ts). A created_at that can't be parsed is an error, not a skip.
+async function detectCheckout(
+  store: CartStore,
+  client: RamiLevyClient,
+): Promise<{ ok: true; reset: ResetAfterOrder | null } | ClientError> {
+  if (store.size === 0) return { ok: true, reset: null };
+  const lastSyncedAt = store.getLastSyncedAt();
+  if (lastSyncedAt === null) return { ok: true, reset: null };
+  const lastSyncedMs = Date.parse(lastSyncedAt);
+  if (!Number.isFinite(lastSyncedMs)) return { ok: true, reset: null };
+
+  const list = await client.getOrderList(1);
+  if (!list.ok) return list;
+
+  let newest: { order: ResetAfterOrder; ms: number } | null = null;
+  for (const order of list.data.orders) {
+    const ms = typeof order.created_at === 'string' ? jerusalemLocalToUtcMs(order.created_at) : null;
+    if (ms === null) {
+      return {
+        ok: false,
+        reason: 'network_error',
+        details: `order ${String(order.id)} has an unrecognized created_at ${JSON.stringify(order.created_at)}; cannot tell whether the cart was checked out`,
+      };
+    }
+    // The API lists newest first, but that isn't relied on.
+    if (ms > lastSyncedMs && (newest === null || ms > newest.ms)) {
+      newest = { order: { orderId: order.id, createdAt: order.created_at }, ms };
+    }
+  }
+  return { ok: true, reset: newest?.order ?? null };
+}
+
+// The one path every cart-mutating tool goes through. It first checks for a
+// checkout since the last sync (detectCheckout) and, if there was one, clears
+// the local cart before applying `mutate`. It then syncs the whole cart (the
+// real /v2/cart is full-replace), and folds the outcome into
+// {ok/reason..., resetAfterOrder?, ...extra, cartTotal, itemCount, serverTotal}.
+//
+// - The checkout check fails: its error is returned and nothing is mutated.
+// - The reset is part of the mutation: `before` is taken ahead of it, so a
+//   failed sync restores the pre-reset cart, and the next call re-detects the
+//   same order (last_synced_at didn't move).
 // - Transport failure (auth_expired / blocked_by_cloudflare / network_error),
 //   or a throw: the local cart is restored to its pre-mutation snapshot, so
 //   ok:false means nothing changed and a retry can't double-add.
@@ -32,10 +92,16 @@ async function mutateAndSync(
   mutate: () => void,
   extra: Record<string, unknown> = {},
 ): Promise<Record<string, unknown>> {
+  const checkout = await detectCheckout(store, client);
+  if (!checkout.ok) return checkout;
+  const reset = checkout.reset;
+  if (reset) extra = { resetAfterOrder: reset, ...extra };
+
   const before = store.snapshot();
   let sync: Awaited<ReturnType<RamiLevyClient['syncCart']>>;
   let payload: Record<string, string>;
   try {
+    if (reset) store.clear();
     mutate();
     payload = cartPayload(store);
     sync = await client.syncCart(payload);
@@ -61,6 +127,9 @@ async function mutateAndSync(
       ...totals(sync.serverTotal),
     };
   }
+
+  // The server now holds exactly what was accepted from this payload.
+  store.setLastSyncedAt(new Date().toISOString());
 
   const accepted = new Set(sync.acceptedIds);
   const rejected = store
@@ -92,6 +161,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         ok: true,
         items: store.getItems(),
         total: store.getTotal(),
+        scope: VIEW_CART_SCOPE,
         checkoutUrl: CHECKOUT_URL,
       });
     },
@@ -100,6 +170,8 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       // Controller ruling: removing a productId that isn't in the cart is
       // not a no-op success — it must say so and must never sync (nothing
       // changed locally, so there's nothing new to push to the account).
+      // Checked before the checkout check: it needs no network, and if the
+      // product isn't here, no reset could put it here either.
       if (!store.getItems().some((i) => i.productId === args.productId)) {
         return json({ ok: false, reason: 'not_in_cart', productId: args.productId });
       }
@@ -232,7 +304,9 @@ const LIMIT = z.number().int().min(1).max(50).optional();
 const CART_SYNC_NOTE =
   'Returns cartTotal (local estimate) and serverTotal (Rami Levy\'s own total — authoritative). ' +
   'ok:false with a transport reason means nothing changed. reason items_rejected means the server refused the listed products; ' +
-  'they have been removed from the cart too, so tell the user and pick alternatives.';
+  'they have been removed from the cart too, so tell the user and pick alternatives. ' +
+  'If resetAfterOrder {orderId, createdAt} is present, an order was placed since the last sync, so the items from before it were ' +
+  'treated as bought and cleared first; tell the user the cart started fresh after that order.';
 
 export const RAMI_LEVY_TOOL_NAMES = [
   'rami_levy_search_products',
@@ -270,7 +344,9 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_view_cart',
     {
-      description: 'Show everything currently in the cart, with the running total and the checkout URL. Reads local state only — no network call. Give the user the checkout URL: the Rami Levy site shows these items once its checkout page loads, not on the home-page cart icon.',
+      description: 'Show this tool\'s own list of what it has put in the cart since the last checkout, with a running total and the checkout URL. ' +
+        'This is NOT a read of the Rami Levy website cart: the API has no way to read the cart back, so anything added, removed or emptied on the website is not visible here (see `scope`). ' +
+        'Reads local state only — no network call. Give the user the checkout URL: the Rami Levy site shows these items once its checkout page loads, not on the home-page cart icon.',
       inputSchema: {},
     },
     withErrorBoundary(h.viewCart),

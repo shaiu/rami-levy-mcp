@@ -144,6 +144,7 @@ test('viewCart reads local state only, no client call', async () => {
     ok: true,
     items: [{ productId: '1', name: 'Milk', price: 6.9, qty: 1 }],
     total: 6.9,
+    scope: 'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: the API has no way to read the cart back.',
     checkoutUrl: 'https://www.rami-levy.co.il/he/dashboard/checkout',
   });
   store.close();
@@ -443,4 +444,204 @@ test('withErrorBoundary turns a thrown error into a structured internal_error re
   const wrapped = withErrorBoundary(throwingHandler);
   const out = textOf(await wrapped({ productId: '1' }));
   assert.deepEqual(out, { ok: false, reason: 'internal_error', details: 'boom' });
+});
+
+// ---- Reset after checkout -------------------------------------------------
+
+const orderList = (orders: { id: string | number; created_at: string }[]) =>
+  async () => ({ ok: true as const, data: { orders, currentPage: 1, lastPage: 1, total: orders.length } });
+
+test('a successful sync records last_synced_at as a UTC instant', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, fakeClient());
+  const t0 = Date.now();
+  await h.addItem({ productId: '1', name: 'Milk', price: 6.9 });
+  const recorded = store.getLastSyncedAt();
+  assert.ok(recorded?.endsWith('Z'), String(recorded));
+  const ms = Date.parse(recorded!);
+  assert.ok(ms >= t0 - 1000 && ms <= Date.now() + 1000, recorded!);
+  store.close();
+});
+
+test('a failed sync does not move last_synced_at', async () => {
+  const store = tempStore();
+  store.setLastSyncedAt('2026-09-01T07:00:00.000Z');
+  const h = ramiLevyToolHandlers(store, fakeClient({ syncCart: async () => ({ ok: false, reason: 'blocked_by_cloudflare' }) }));
+  await h.addItem({ productId: '1', name: 'Milk', price: 6.9 });
+  assert.equal(store.getLastSyncedAt(), '2026-09-01T07:00:00.000Z');
+  store.close();
+});
+
+test('an order newer than the last sync clears the local cart before the add, and says so', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 2); // bought in order 555
+  store.addItem('2', 'Bread', 8.5, 1);
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z'); // 10:00 Israel (IDT, UTC+3)
+  let synced: Record<string, string> | undefined;
+  const client = fakeClient({
+    // Oldest first on purpose: the newest order is found without relying on API order.
+    getOrderList: orderList([
+      { id: 500, created_at: '2026-09-01 09:00:00' },
+      { id: 555, created_at: '2026-09-08 12:30:00' },
+      { id: 554, created_at: '2026-09-08 11:00:00' },
+    ]),
+    syncCart: async (items: Record<string, string>) => { synced = items; return acceptAll(items, 4.5); },
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '3', name: 'Eggs', price: 4.5 }));
+  assert.deepEqual(out, {
+    ok: true,
+    resetAfterOrder: { orderId: 555, createdAt: '2026-09-08 12:30:00' },
+    cartTotal: 4.5,
+    itemCount: 1,
+    serverTotal: 4.5,
+  });
+  assert.deepEqual(synced, { '3': '1.00' }); // the previous order is not resurrected
+  assert.deepEqual(store.getItems(), [{ productId: '3', name: 'Eggs', price: 4.5, qty: 1 }]);
+  store.close();
+});
+
+test('an order older than the last sync leaves the local cart alone', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z'); // 10:00 Israel
+  const client = fakeClient({ getOrderList: orderList([{ id: 554, created_at: '2026-09-08 09:59:00' }]) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '3', name: 'Eggs', price: 4.5 })) as Record<string, unknown>;
+  assert.equal(out.ok, true);
+  assert.equal('resetAfterOrder' in out, false);
+  assert.equal(store.size, 2);
+  store.close();
+});
+
+test('an empty local cart skips the order fetch entirely', async () => {
+  const store = tempStore();
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  let fetched = false;
+  const client = fakeClient({ getOrderList: async () => { fetched = true; return { ok: false, reason: 'blocked_by_cloudflare' }; } });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '1', name: 'Milk', price: 6.9 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.equal(fetched, false);
+  store.close();
+});
+
+test('no recorded sync (a pre-upgrade cart) skips the order fetch', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  let fetched = false;
+  const client = fakeClient({ getOrderList: async () => { fetched = true; return { ok: false, reason: 'blocked_by_cloudflare' }; } });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '2', name: 'Bread', price: 8.5 })) as { ok: boolean };
+  assert.equal(out.ok, true);
+  assert.equal(fetched, false);
+  store.close();
+});
+
+test('an order-list failure aborts the mutation: ok:false, no sync, cart untouched', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  let synced = false;
+  const client = fakeClient({
+    getOrderList: async () => ({ ok: false, reason: 'auth_expired', status: 401 }),
+    syncCart: async (items: Record<string, string>) => { synced = true; return acceptAll(items); },
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  for (const call of [
+    () => h.addItem({ productId: '2', name: 'Bread', price: 8.5 }),
+    () => h.removeItem({ productId: '1' }),
+    () => h.clearCart(),
+  ]) {
+    assert.deepEqual(textOf(await call()), { ok: false, reason: 'auth_expired', status: 401 });
+  }
+  assert.equal(synced, false);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 1 }]);
+  assert.equal(store.getLastSyncedAt(), '2026-09-08T07:00:00.000Z');
+  store.close();
+});
+
+test('an unparseable created_at aborts the mutation rather than skipping the check', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  let synced = false;
+  const client = fakeClient({
+    getOrderList: orderList([{ id: 9, created_at: 'yesterday' }]),
+    syncCart: async (items: Record<string, string>) => { synced = true; return acceptAll(items); },
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '2', name: 'Bread', price: 8.5 })) as { ok: boolean; reason: string };
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'network_error');
+  assert.equal(synced, false);
+  assert.equal(store.size, 1);
+  store.close();
+});
+
+test('a reset whose sync then fails restores the pre-reset cart (ok:false means nothing changed)', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  const client = fakeClient({
+    getOrderList: orderList([{ id: 555, created_at: '2026-09-08 12:30:00' }]),
+    syncCart: async () => ({ ok: false, reason: 'network_error', details: 'ECONNRESET' }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItem({ productId: '3', name: 'Eggs', price: 4.5 })) as { ok: boolean };
+  assert.equal(out.ok, false);
+  assert.deepEqual(store.getItems(), [{ productId: '1', name: 'Milk', price: 6.9, qty: 1 }]);
+  store.close();
+});
+
+test('clearCart and reorderFromHistory also reset after a checkout', async () => {
+  const newer = orderList([{ id: 555, created_at: '2026-09-08 12:30:00' }]);
+
+  const s1 = tempStore();
+  s1.addItem('1', 'Milk', 6.9, 1);
+  s1.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  const cleared = textOf(await ramiLevyToolHandlers(s1, fakeClient({ getOrderList: newer })).clearCart()) as Record<string, unknown>;
+  assert.equal(cleared.ok, true);
+  assert.deepEqual(cleared.resetAfterOrder, { orderId: 555, createdAt: '2026-09-08 12:30:00' });
+  s1.close();
+
+  const s2 = tempStore();
+  s2.addItem('1', 'Milk', 6.9, 1); // bought in 555 — must not be carried into the reorder
+  s2.setLastSyncedAt('2026-09-08T07:00:00.000Z');
+  const client = fakeClient({
+    getOrderList: newer,
+    getOrderDetail: async (id: number) => ({ ok: true, data: { id, lines: [{ item_id: '2', name: 'Bread', quantity: 1, price: '8.50' }] } }),
+  });
+  const out = textOf(await ramiLevyToolHandlers(s2, client).reorderFromHistory({ numOrders: 1, minOccurrences: 1 })) as Record<string, unknown>;
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.resetAfterOrder, { orderId: 555, createdAt: '2026-09-08 12:30:00' });
+  assert.deepEqual(s2.getItems(), [{ productId: '2', name: 'Bread', price: 8.5, qty: 1 }]);
+  s2.close();
+});
+
+// Israel is UTC+2 in winter and UTC+3 in summer. Each case is chosen so that
+// the wrong fixed offset would get the answer backwards.
+test('checkout detection uses Israel winter time (UTC+2) for a January order', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-01-15T08:30:00.000Z'); // 10:30 Israel (IST)
+  // 11:15 IST = 09:15Z, after the sync. A fixed +03:00 would read 08:15Z: before it.
+  const client = fakeClient({ getOrderList: orderList([{ id: 1, created_at: '2026-01-15 11:15:00' }]) });
+  const out = textOf(await ramiLevyToolHandlers(store, client).addItem({ productId: '2', name: 'Bread', price: 8.5 })) as Record<string, unknown>;
+  assert.deepEqual(out.resetAfterOrder, { orderId: 1, createdAt: '2026-01-15 11:15:00' });
+  assert.deepEqual(store.getItems().map((i) => i.productId), ['2']);
+  store.close();
+});
+
+test('checkout detection uses Israel summer time (UTC+3) for a July order', async () => {
+  const store = tempStore();
+  store.addItem('1', 'Milk', 6.9, 1);
+  store.setLastSyncedAt('2026-07-15T08:30:00.000Z'); // 11:30 Israel (IDT)
+  // 11:15 IDT = 08:15Z, before the sync. A fixed +02:00 would read 09:15Z: after it.
+  const client = fakeClient({ getOrderList: orderList([{ id: 1, created_at: '2026-07-15 11:15:00' }]) });
+  const out = textOf(await ramiLevyToolHandlers(store, client).addItem({ productId: '2', name: 'Bread', price: 8.5 })) as Record<string, unknown>;
+  assert.equal(out.ok, true);
+  assert.equal('resetAfterOrder' in out, false);
+  assert.deepEqual(store.getItems().map((i) => i.productId), ['1', '2']);
+  store.close();
 });

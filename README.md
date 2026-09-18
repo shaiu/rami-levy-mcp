@@ -54,7 +54,9 @@ above first.
 
 - `rami_levy_search_products(query, limit?)`
 - `rami_levy_add_item(productId, name, price, qty?)`
-- `rami_levy_view_cart()`
+- `rami_levy_view_cart()` — this tool's own list of what it has put in the
+  cart since the last checkout, not a read of the website cart (see below).
+  The response carries a `scope` field saying so.
 - `rami_levy_remove_item(productId)`
 - `rami_levy_clear_cart()`
 - `rami_levy_reorder_from_history(numOrders?, minOccurrences?)` — adds onto
@@ -73,7 +75,9 @@ Every cart-mutating tool (`add_item`, `remove_item`, `clear_cart`,
 total from the sync response, `null` if it gave none). If the sync fails at
 the transport level (`auth_expired`, `blocked_by_cloudflare`,
 `network_error`), the local cart is rolled back: `ok: false` means nothing
-changed, so retrying is safe.
+changed, so retrying is safe. If the response carries
+`resetAfterOrder: {orderId, createdAt}`, the cart was cleared after a checkout
+before the change was applied (see below).
 
 ### Where the synced cart shows up on the website
 
@@ -90,6 +94,36 @@ already holds a product, `remove_item` or `clear_cart` deletes it from the
 server cart, but the browser's copy brings it back the next time checkout
 loads. Adds and quantities from this server always show up.
 
+### The local cart vs. the real one
+
+The server keeps its own cart in SQLite and pushes the whole thing to the
+account on every change. Rami Levy's API has **no endpoint to read the cart
+back**, so the local cart can drift from the real one whenever the cart
+changes outside this tool:
+
+- **Checkout.** After an order is placed, the site's cart is empty, but the
+  local cart still holds everything that was bought, and the next sync would
+  put the whole order back. So before every cart change (`add_item`,
+  `remove_item`, `clear_cart`, `reorder_from_history`), if the local cart isn't
+  empty, the server fetches page 1 of the order history. If any order was
+  created after the last successful sync, those items were bought: the local
+  cart is cleared first, then the change is applied, and the response includes
+  `resetAfterOrder: {orderId, createdAt}` so the agent can tell the user the
+  cart started fresh. If the order history can't be fetched, the change is
+  not made: the tool returns the usual `ok: false` reason. It never skips the
+  check. The last-sync time lives in the same SQLite file (a `meta` table,
+  added automatically to an existing DB); a cart from before this upgrade
+  has no sync time, so the check starts working after its first sync.
+- **Edits made on the website.** Anything added, removed, or emptied in the
+  browser is invisible to this server. `view_cart` shows only what this tool
+  has put in the cart since the last checkout, and says so in its `scope`
+  field.
+
+Timezones: an order's `created_at` is a naive Israel-time string
+(`"2026-09-08 10:15:00"`), while the last-sync time is stored as a UTC
+instant. The order time is converted to UTC with the real `Asia/Jerusalem`
+rules from `Intl` (UTC+2 in winter, UTC+3 in summer), never a fixed offset.
+
 ## Errors
 
 Every tool responds with `{ ok: false, reason, ... }` instead of throwing.
@@ -99,7 +133,7 @@ Reasons and what to do about each:
 |---|---|---|
 | `auth_expired` | A JSON response came back 401/403 | Re-capture the token bundle above |
 | `blocked_by_cloudflare` | The response wasn't JSON, at any HTTP status | Recapture the bundle first (`cf_clearance` expires). Only if a fresh capture still fails, suspect your egress IP (proxy/VPN/Israeli IP) |
-| `network_error` | Fetch failed, the body was invalid JSON, the response shape was unexpected, or search ignored the query | Check connectivity; if it persists, the API may have changed (see below) |
+| `network_error` | Fetch failed, the body was invalid JSON, the response shape was unexpected (including an order `created_at` that can't be read during the checkout check), or search ignored the query | Check connectivity; if it persists, the API may have changed (see below) |
 | `items_rejected` | The cart sync succeeded but the server dropped some products (`rejected: [{productId, name}]`) | They were removed from the local cart too; search for alternatives |
 | `not_in_cart` | `remove_item` was called for a product not currently in the cart (nothing was synced) | Check `view_cart` for the current contents |
 | `invalid_args` | `reorder_from_history`'s `numOrders`/`minOccurrences` were out of bounds | Pass `numOrders` 1–50 and `minOccurrences` between 1 and `numOrders` |

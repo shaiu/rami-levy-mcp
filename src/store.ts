@@ -28,6 +28,28 @@ export class CartStore {
         qty        REAL NOT NULL
       )
     `);
+    // Added after v0.1.0. IF NOT EXISTS lets a DB created before it upgrade
+    // in place: the table simply appears, empty, on the next open.
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS meta (
+        key   TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      )
+    `);
+  }
+
+  // When the cart was last synced successfully to the real account, as a UTC
+  // ISO-8601 instant (e.g. "2026-09-18T07:30:00.000Z"), or null if this DB has
+  // never recorded one. See tools.ts detectCheckout for how it is compared.
+  getLastSyncedAt(): string | null {
+    const row = this.db.prepare("SELECT value FROM meta WHERE key = 'last_synced_at'").get() as { value: string } | undefined;
+    return row?.value ?? null;
+  }
+
+  setLastSyncedAt(isoUtc: string): void {
+    this.db
+      .prepare("INSERT INTO meta (key, value) VALUES ('last_synced_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+      .run(isoUtc);
   }
 
   addItem(productId: string, name: string, price: number, qty: number): void {
