@@ -1,7 +1,11 @@
 export interface RamiLevyConfig {
   bearerToken: string;
   ecomToken: string;
-  cookie: string;
+  // Measured live (2026-09-18, Israeli residential IP): the browser sent no
+  // cookie at all to www-api or www, and the orders/search requests still
+  // returned 200. A cookie only matters once Cloudflare starts challenging
+  // the egress IP (then it's cf_clearance that's needed), so it's optional.
+  cookie?: string;
   userAgent: string;
   store: string;
 }
@@ -13,7 +17,8 @@ export interface SearchResult {
 }
 
 export interface OrderSummary {
-  id: string;
+  // Measured live (2026-09-18): the real API returns this as a number.
+  id: string | number;
   created_at: string;
 }
 
@@ -27,7 +32,11 @@ export interface OrderListResult {
 export interface OrderLine {
   item_id: string | number;
   name: string;
-  quantity: string;
+  // Measured live (2026-09-18): the real API returns this as a number.
+  quantity: string | number;
+  // Measured live (2026-09-18): present as a string on current orders, but
+  // older order data may lack it entirely.
+  price?: string;
 }
 
 export interface OrderDetail {
@@ -56,7 +65,8 @@ export class RamiLevyClient {
       origin: 'https://www.rami-levy.co.il',
       referer: 'https://www.rami-levy.co.il/',
       ecomtoken: this.config.ecomToken,
-      cookie: this.config.cookie,
+      // Only sent when configured — see the RamiLevyConfig.cookie comment.
+      ...(this.config.cookie ? { cookie: this.config.cookie } : {}),
       'user-agent': this.config.userAgent,
       authorization: `Bearer ${this.config.bearerToken}`,
       ...extra,
@@ -158,13 +168,15 @@ export class RamiLevyClient {
     return { ok: true, results };
   }
 
-  // Response shape, derived from the bot this replaces (not yet measured
-  // live): whatsapp-baileys-api/rami-levy-client.js:111-112 unwrapped the n8n
-  // proxy's single `{ok, data: <real body>}` layer (`data.data || data`), and
-  // message-handler.js:317-319 then read `synced.items` (an array — it used
-  // `.length`) and `synced.price` (the cart total). So the real body carries
-  // `items` and `price` at the top level. The server decides what it accepts,
-  // so the caller diffs acceptedIds against what it sent.
+  // Measured live (2026-09-18: a one-item sync, then an empty sync). The real
+  // body carries `items` (an array of `{id, name, price, quantity, ...}`,
+  // `id` a number) and `price` (the product total, as a number) at the top
+  // level, alongside other fields (`sales`, `log_id`, `meta`, `status`, …)
+  // this client ignores. Rami Levy adds its own delivery-fee line to `items`
+  // server-side (e.g. `{id: 164854, name: "מחיר משלוח", price: 35.9,
+  // quantity: 1}`); the top-level `price` excludes it. The caller diffs
+  // acceptedIds against what it actually sent, so that extra line is simply
+  // never matched to a local cart product and has no effect.
   async syncCart(items: Record<string, string>): Promise<ClientResult<{ acceptedIds: string[]; serverTotal: number | null }>> {
     const supplyAt = new Date();
     supplyAt.setDate(supplyAt.getDate() + 1);
@@ -218,8 +230,8 @@ export class RamiLevyClient {
     };
   }
 
-  async getOrderDetail(orderId: string): Promise<ClientResult<{ data: OrderDetail }>> {
-    const result = await this.request<{ data?: OrderDetail }>(`${ORDERS_URL}/${encodeURIComponent(orderId)}`, {
+  async getOrderDetail(orderId: string | number): Promise<ClientResult<{ data: OrderDetail }>> {
+    const result = await this.request<{ data?: OrderDetail }>(`${ORDERS_URL}/${encodeURIComponent(String(orderId))}`, {
       method: 'GET',
       headers: this.headers(),
     });
@@ -232,17 +244,15 @@ export class RamiLevyClient {
   }
 }
 
-// Which field of a cart-response item carries the product id is unverified
-// (the bot only ever counted them), so every plausible id field is collected:
-// a product counts as accepted if any of them matches what was sent. An item
-// exposing none of them is an unrecognized shape, never a silent pass.
+// Measured live (2026-09-18): the product id is always at `id` (a number,
+// e.g. 419939) — there is no item_id or product_id field on a cart-response
+// item. Only `id` is read (not the item_id/product_id alternatives this used
+// to also accept), so a line id can never be mistaken for a different
+// product's id. An item missing `id` entirely is an unrecognized shape,
+// never a silent pass.
 function cartEntryIds(entry: unknown): string[] {
   if (typeof entry === 'string' || typeof entry === 'number') return [String(entry)];
   if (!entry || typeof entry !== 'object') return [];
-  const ids: string[] = [];
-  for (const key of ['id', 'item_id', 'product_id'] as const) {
-    const v = (entry as Record<string, unknown>)[key];
-    if (typeof v === 'string' || typeof v === 'number') ids.push(String(v));
-  }
-  return ids;
+  const v = (entry as Record<string, unknown>).id;
+  return typeof v === 'string' || typeof v === 'number' ? [String(v)] : [];
 }

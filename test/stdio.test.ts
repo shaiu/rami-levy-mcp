@@ -20,7 +20,6 @@ function baseEnv(dbPath: string): Record<string, string> {
     ...env,
     RAMI_LEVY_BEARER_TOKEN: 'dummy-token',
     RAMI_LEVY_ECOM_TOKEN: 'dummy-ecom-token',
-    RAMI_LEVY_COOKIE: 'dummy-cookie',
     RAMI_LEVY_USER_AGENT: 'dummy-user-agent',
     RAMI_LEVY_DB_PATH: dbPath,
   };
@@ -42,10 +41,14 @@ function runToExit(env: Record<string, string>): Promise<{ code: number | null; 
   });
 }
 
-test('server starts, lists the registered tools, and view_cart works end to end', async () => {
+test('server starts, lists the registered tools, and view_cart works end to end with no RAMI_LEVY_COOKIE set', async () => {
+  // baseEnv() deliberately sets no RAMI_LEVY_COOKIE — it's optional now
+  // (measured live 2026-09-18: not needed from an Israeli residential IP),
+  // and the server must still start and serve tools without it.
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rl-stdio-'));
   const dbPath = path.join(tmpDir, 'nested', 'does-not-exist-yet', 'cart.db');
   const env = baseEnv(dbPath);
+  assert.equal('RAMI_LEVY_COOKIE' in env, false);
 
   const transport = new StdioClientTransport({
     command: 'node',
@@ -90,4 +93,14 @@ test('RAMI_LEVY_BEARER_TOKEN left as the literal "placeholder" fails loudly and 
   const { code, stderr } = await runToExit(env);
   assert.notEqual(code, 0);
   assert.match(stderr, /missing required env var RAMI_LEVY_BEARER_TOKEN/);
+});
+
+test('RAMI_LEVY_COOKIE left as the literal "placeholder" fails loudly, even though the var is optional', async () => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rl-stdio-'));
+  const env = baseEnv(path.join(tmpDir, 'cart.db'));
+  env.RAMI_LEVY_COOKIE = 'placeholder';
+
+  const { code, stderr } = await runToExit(env);
+  assert.notEqual(code, 0);
+  assert.match(stderr, /env var RAMI_LEVY_COOKIE is still set to "placeholder"/);
 });

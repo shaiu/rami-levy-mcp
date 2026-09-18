@@ -38,6 +38,24 @@ function assertAuthHeaders(init: RequestInit): void {
   assert.equal(h['user-agent'], 'test-agent');
 }
 
+test('the client omits the cookie header when no cookie is configured', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
+  const client = new RamiLevyClient({ ...CONFIG, cookie: undefined });
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, true);
+  const h = calls[0].init.headers as Record<string, string>;
+  assert.equal('cookie' in h, false, JSON.stringify(h));
+});
+
+test('the client sends the cookie header when a cookie is configured', async (t) => {
+  const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, true);
+  const h = calls[0].init.headers as Record<string, string>;
+  assert.equal(h.cookie, 'test-cookie');
+});
+
 test('searchProducts POSTs {q, store} as JSON to /api/catalog with the full auth bundle', async (t) => {
   const calls = captureFetch(t, () => fakeResponse(200, { q: 'milk', data: [] }));
   const client = new RamiLevyClient(CONFIG);
@@ -199,14 +217,44 @@ test('syncCart POSTs the full item map to /api/v2/cart and returns the accepted 
 });
 
 test('syncCart reports only what the server kept, so the caller can see a rejection', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ item_id: 1 }], price: '13.80' }));
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [{ id: 1 }], price: '13.80' }));
   const client = new RamiLevyClient(CONFIG);
   const result = await client.syncCart({ '1': '2.00', '2': '1.00' });
   assert.deepEqual(result, { ok: true, acceptedIds: ['1'], serverTotal: 13.8 });
 });
 
-test('syncCart of an empty cart accepts an empty items array', async (t) => {
-  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { items: [], price: 0 }));
+// Real response, captured live 2026-09-18 (a one-item sync): Rami Levy adds
+// its own delivery-fee line to `items` server-side, and the top-level
+// `price` is the product total only — it excludes that delivery line.
+test('syncCart parses the real response shape: a product line plus the server-added delivery-fee line', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, {
+      sales: [],
+      items: [
+        { id: 419939, name: 'Milk', price: 7.1, quantity: 1, FormatedPrice: '7.10' },
+        { id: 164854, name: 'מחיר משלוח', price: 35.9, quantity: 1 },
+      ],
+      log_id: 'abc123',
+      price: 7.1,
+      priceClub: 7.1,
+      discountClub: 0,
+      priceWallet: 7.1,
+      discountWallet: 0,
+      discount: 0,
+      quantity: 1,
+      meta: { ct: 1, ms: 2, cs: 3 },
+      status: 'ok',
+    }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.syncCart({ '419939': '1.00' });
+  assert.deepEqual(result, { ok: true, acceptedIds: ['419939', '164854'], serverTotal: 7.1 });
+});
+
+test('syncCart of an empty cart (real shape: no delivery line either) accepts an empty items array', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () =>
+    fakeResponse(200, { sales: [], items: [], log_id: 'abc123', price: 0, status: 'ok' }),
+  );
   const client = new RamiLevyClient(CONFIG);
   const result = await client.syncCart({});
   assert.deepEqual(result, { ok: true, acceptedIds: [], serverTotal: 0 });
@@ -280,4 +328,29 @@ test('getOrderDetail URL-encodes the order id', async (t) => {
   const client = new RamiLevyClient(CONFIG);
   await client.getOrderDetail('a/b c');
   assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/a%2Fb%20c');
+});
+
+test('getOrderDetail accepts a numeric order id (the real API returns OrderSummary.id as a number)', async (t) => {
+  const calls = captureFetch(t, () =>
+    fakeResponse(200, { data: { id: 12345, lines: [{ item_id: 1, name: 'Milk', quantity: 2, price: '6.90' }] } }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.getOrderDetail(12345);
+  assert.equal(calls[0].url, 'https://www-api.rami-levy.co.il/api/v3/site/orders/12345');
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.data, { id: 12345, lines: [{ item_id: 1, name: 'Milk', quantity: 2, price: '6.90' }] });
+});
+
+test('getOrderList parses a numeric OrderSummary.id and a numeric OrderLine.quantity', async (t) => {
+  captureFetch(t, () =>
+    fakeResponse(200, {
+      data: { data: { current_page: 1, last_page: 1, total: 1, data: [{ id: 999, created_at: '2026-09-08 10:00:00' }] } },
+    }),
+  );
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.getOrderList(1);
+  assert.equal(result.ok, true);
+  if (!result.ok) return;
+  assert.deepEqual(result.data.orders, [{ id: 999, created_at: '2026-09-08 10:00:00' }]);
 });

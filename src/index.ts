@@ -16,10 +16,24 @@ function requireEnv(name: string): string {
   return value;
 }
 
+// RAMI_LEVY_COOKIE is optional (measured live 2026-09-18: not needed from an
+// Israeli residential IP), but the literal "placeholder" left over from
+// mcp.json is still rejected — same rule as the required vars, just without
+// the "must be present" half.
+function optionalEnv(name: string): string | undefined {
+  const value = process.env[name];
+  if (!value) return undefined;
+  if (value === 'placeholder') {
+    console.error(`rami-levy-mcp: env var ${name} is still set to "placeholder"`);
+    process.exit(1);
+  }
+  return value;
+}
+
 const config = {
   bearerToken: requireEnv('RAMI_LEVY_BEARER_TOKEN'),
   ecomToken: requireEnv('RAMI_LEVY_ECOM_TOKEN'),
-  cookie: requireEnv('RAMI_LEVY_COOKIE'),
+  cookie: optionalEnv('RAMI_LEVY_COOKIE'),
   userAgent: requireEnv('RAMI_LEVY_USER_AGENT'),
   store: process.env.RAMI_LEVY_STORE || '412',
 };

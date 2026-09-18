@@ -121,7 +121,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         return json({ ok: false, reason: 'invalid_args', message: `minOccurrences must be between 1 and ${numOrders}` });
       }
 
-      const summaries: { id: string; created_at: string }[] = [];
+      const summaries: { id: string | number; created_at: string }[] = [];
       let page = 1;
       while (summaries.length < numOrders) {
         const result = await client.getOrderList(page);
@@ -133,28 +133,42 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       summaries.sort((a, b) => b.created_at.localeCompare(a.created_at));
       const selected = summaries.slice(0, numOrders);
 
-      const stats = new Map<string, { name: string; qtys: number[]; orders: Set<string> }>();
+      // `selected` is sorted newest-first, so the first line seen for a given
+      // item_id (across orders, in this loop's iteration order) always comes
+      // from the most recent order that carried it — that's where `price`
+      // is captured from.
+      const stats = new Map<string, { name: string; qtys: number[]; orders: Set<string>; price?: number }>();
       for (const summary of selected) {
         const detail = await client.getOrderDetail(summary.id);
         if (!detail.ok) return json(detail);
         for (const line of detail.data.lines) {
+          // A line whose quantity isn't a positive finite number can't be
+          // reordered meaningfully, so it's skipped entirely rather than
+          // polluting the median or counting as an occurrence.
+          const qty = Number(line.quantity);
+          if (!Number.isFinite(qty) || qty <= 0) continue;
+
           const id = String(line.item_id);
           let rec = stats.get(id);
           if (!rec) {
             rec = { name: line.name, qtys: [], orders: new Set() };
             stats.set(id, rec);
           }
-          rec.qtys.push(parseFloat(line.quantity));
-          rec.orders.add(summary.id);
+          rec.qtys.push(qty);
+          rec.orders.add(String(summary.id));
+          if (rec.price === undefined) {
+            const price = Number(line.price);
+            if (Number.isFinite(price)) rec.price = price;
+          }
         }
       }
 
-      const added: { productId: string; name: string; qty: number }[] = [];
+      const added: { productId: string; name: string; qty: number; price?: number }[] = [];
       for (const [id, rec] of stats) {
         if (rec.orders.size < minOccurrences) continue;
         const sorted = [...rec.qtys].sort((a, b) => a - b);
         const median = sorted[Math.floor(sorted.length / 2)];
-        added.push({ productId: id, name: rec.name, qty: median });
+        added.push({ productId: id, name: rec.name, qty: median, price: rec.price });
       }
 
       if (added.length === 0) {
@@ -163,13 +177,15 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
 
       const apply = () => {
         for (const a of added) {
-          // A past order line carries no current price, and the real /cart
-          // endpoint prices server-side from productId anyway — reuse whatever
-          // price this product already has in the cart, or 0 if it's new.
-          // cartTotal under-counts a freshly-reordered item; serverTotal is
-          // the authoritative number.
+          // Price the reorder at the price from the most recent order line
+          // that carried this product (a.price, computed above). Fall back
+          // to whatever price this product already has in the cart, then 0,
+          // only when no order line ever carried a finite price. The real
+          // /cart endpoint prices server-side from productId anyway, so this
+          // only affects the local cartTotal estimate; serverTotal (from the
+          // sync response) is authoritative.
           const existing = store.getItems().find((i) => i.productId === a.productId);
-          store.addItem(a.productId, a.name, existing?.price ?? 0, a.qty);
+          store.addItem(a.productId, a.name, a.price ?? existing?.price ?? 0, a.qty);
         }
       };
       return json(await mutateAndSync(store, client, apply, { added }));
