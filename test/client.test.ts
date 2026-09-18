@@ -37,6 +37,16 @@ test('searchProducts maps the real API shape into SearchResult[]', async (t) => 
   ]);
 });
 
+test('an unexpected search response shape is classified as network_error, not thrown', async (t) => {
+  t.mock.method(globalThis, 'fetch', async () => fakeResponse(200, { data: { foo: 1 } }));
+  const client = new RamiLevyClient(CONFIG);
+  const result = await client.searchProducts('milk');
+  assert.equal(result.ok, false);
+  if (result.ok) return;
+  assert.equal(result.reason, 'network_error');
+  assert.ok('details' in result && result.details.startsWith('Unexpected search shape'), `unexpected details: ${JSON.stringify(result)}`);
+});
+
 test('a JSON 401/403 response is classified as auth_expired', async (t) => {
   t.mock.method(globalThis, 'fetch', async () => fakeResponse(401, { error: 'unauthenticated' }));
   const client = new RamiLevyClient(CONFIG);
