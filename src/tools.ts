@@ -176,10 +176,15 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
     },
 
     async checkStatus(): Promise<Content> {
-      // The real API has no dedicated health endpoint once the n8n shim is
-      // gone — a minimal search is the cheapest real connectivity+auth probe.
-      const result = await client.searchProducts('a', 1);
-      if (!result.ok) return json(result);
+      // The real API has no dedicated health endpoint. Two read-only probes:
+      // a catalog search (www host; also exercises the query-echo check) and
+      // page 1 of the order list (www-api host, and it needs the logged-in
+      // session — the catalog may well answer anonymous requests, so it alone
+      // can't detect an expired session).
+      const search = await client.searchProducts('חלב', 1);
+      if (!search.ok) return json(search);
+      const orders = await client.getOrderList(1);
+      if (!orders.ok) return json(orders);
       return json({ ok: true, cartSize: store.size });
     },
   };
@@ -285,7 +290,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_check_status',
     {
-      description: 'Check whether the Rami Levy connection is working (network + auth) and report the current cart size.',
+      description: 'Check whether the Rami Levy connection is working: probes the catalog search and the (session-authenticated) order history, returning the first failure if either fails, else the current cart size. Read-only.',
       inputSchema: {},
     },
     withErrorBoundary(h.checkStatus),

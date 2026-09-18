@@ -262,13 +262,26 @@ test('reorderFromHistory rejects numOrders out of the 1-50 range', async () => {
   store.close();
 });
 
-test('checkStatus reports ok when the probe search succeeds', async () => {
+test('checkStatus reports ok when both the search and the order-list probes succeed', async () => {
   const store = tempStore();
-  const client = fakeClient({ searchProducts: async () => ({ ok: true, results: [] }) });
+  let ordersProbed = false;
+  const client = fakeClient({
+    searchProducts: async () => ({ ok: true, results: [] }),
+    getOrderList: async () => { ordersProbed = true; return { ok: true, data: { orders: [], currentPage: 1, lastPage: 1, total: 0 } }; },
+  });
   const h = ramiLevyToolHandlers(store, client);
-  const out = textOf(await h.checkStatus()) as { ok: boolean; cartSize: number };
-  assert.equal(out.ok, true);
-  assert.equal(out.cartSize, 0);
+  const out = textOf(await h.checkStatus());
+  assert.deepEqual(out, { ok: true, cartSize: 0 });
+  assert.equal(ordersProbed, true);
+  store.close();
+});
+
+test('checkStatus surfaces an order-list failure even when search succeeds (expired session)', async () => {
+  const store = tempStore();
+  const client = fakeClient({ getOrderList: async () => ({ ok: false, reason: 'auth_expired', status: 401 }) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.checkStatus());
+  assert.deepEqual(out, { ok: false, reason: 'auth_expired', status: 401 });
   store.close();
 });
 
