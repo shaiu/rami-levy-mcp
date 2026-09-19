@@ -61,6 +61,12 @@ test('server starts, lists the registered tools, and view_cart works end to end 
   try {
     await client.connect(transport);
 
+    // The version the server announces is the release it came from. It is
+    // written in src/index.ts by hand, so this is what stops it drifting from
+    // package.json at the next release (both said 0.1.0 through three releases).
+    const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'package.json'), 'utf8'));
+    assert.equal(client.getServerVersion()?.version, pkg.version);
+
     const { tools } = await client.listTools();
     assert.deepEqual(
       tools.map((t) => t.name).sort(),

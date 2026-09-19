@@ -45,7 +45,7 @@ fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 const store = new CartStore(dbPath);
 const client = new RamiLevyClient(config);
 
-const server = new McpServer({ name: 'rami-levy-mcp', version: '0.1.0' });
+const server = new McpServer({ name: 'rami-levy-mcp', version: '0.2.0' });
 registerRamiLevyTools(server, store, client);
 
 await server.connect(new StdioServerTransport());
