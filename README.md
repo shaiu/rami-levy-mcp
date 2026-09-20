@@ -89,6 +89,14 @@ anything this server added until the checkout page has been opened once.
 Point people at the `checkoutUrl` that `rami_levy_view_cart` returns.
 (Measured live on 2026-09-18.)
 
+Because the merge runs on page load, a checkout page that was **already open
+when the cart changed keeps showing the pre-change contents** — which reads
+like the add silently failed. `view_cart` returns a `checkoutHint` field
+saying to reload it, and the cart-mutating tools' descriptions say the same,
+so the agent volunteers it instead of sending the user to a stale page.
+(Hit for real on 2026-09-20: an item added seconds after the checkout page
+loaded was absent in the browser and present in the account cart.)
+
 Because that step is a merge, removals don't propagate. If the browser
 already holds a product, `remove_item` or `clear_cart` deletes it from the
 server cart, but the browser's copy brings it back the next time checkout
@@ -119,9 +127,11 @@ changes outside this tool:
   has put in the cart since the last checkout, and says so in its `scope`
   field.
 
-Timezones: an order's `created_at` is a naive Israel-time string
-(`"2026-09-08 10:15:00"`), while the last-sync time is stored as a UTC
-instant. The order time is converted to UTC with the real `Asia/Jerusalem`
+Timezones: the last-sync time is stored as a UTC instant, and an order's
+`created_at` is resolved to one before they're compared. Live (measured
+2026-09-20) that field is zoned ISO-8601 — `"2026-09-08T05:59:37.000000Z"` —
+and is taken at its word. A naive Israel-time string (`"2026-09-08 10:15:00"`,
+no offset) is also accepted, and converted with the real `Asia/Jerusalem`
 rules from `Intl` (UTC+2 in winter, UTC+3 in summer), never a fixed offset.
 
 ## Errors

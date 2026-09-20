@@ -146,6 +146,7 @@ test('viewCart reads local state only, no client call', async () => {
     total: 6.9,
     scope: 'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: the API has no way to read the cart back.',
     checkoutUrl: 'https://www.rami-levy.co.il/he/dashboard/checkout',
+    checkoutHint: 'The site merges this cart into the browser only when the checkout page loads, so a checkout page opened before the last change still shows the old contents — reload it.',
   });
   store.close();
 });
