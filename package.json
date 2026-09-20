@@ -17,7 +17,8 @@
   "files": [
     "dist",
     "plugin.json",
-    "mcp.json"
+    "mcp.json",
+    "skills"
   ],
   "scripts": {
     "build": "tsc",

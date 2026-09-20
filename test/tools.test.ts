@@ -781,3 +781,132 @@ test('viewOrder passes a client failure straight through', async () => {
   assert.deepEqual(out, { ok: false, reason: 'blocked_by_cloudflare' });
   store.close();
 });
+
+// --- suggestReorder: the reorder selection, without touching the cart ---
+
+// Two orders: milk in both, bread in one only.
+function historyClient(overrides: Partial<RamiLevyClient> = {}): RamiLevyClient {
+  return fakeClient({
+    getOrderList: async () => ({
+      ok: true,
+      data: {
+        orders: [
+          { id: 'o2', created_at: '2026-09-08T05:00:00.000000Z' },
+          { id: 'o1', created_at: '2026-09-01T05:00:00.000000Z' },
+        ],
+        currentPage: 1,
+        lastPage: 1,
+        total: 2,
+      },
+    }),
+    getOrderDetail: async (orderId: string | number) => ({
+      ok: true,
+      data: orderId === 'o2'
+        ? { id: 'o2', lines: [{ item_id: 1, name: 'Milk', price: '7.1', quantity: 2 }, { item_id: 2, name: 'Bread', price: '8.3', quantity: 1 }] }
+        : { id: 'o1', lines: [{ item_id: 1, name: 'Milk', price: '6.9', quantity: 4 }] },
+    }),
+    ...overrides,
+  });
+}
+
+test('suggestReorder reports each candidate with its occurrences, median qty and last price paid', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, historyClient());
+  const out = textOf(await h.suggestReorder({ numOrders: 2, minOccurrences: 2 }));
+  assert.deepEqual(out, {
+    ok: true,
+    ordersConsidered: 2,
+    minOccurrences: 2,
+    candidates: [{ productId: '1', name: 'Milk', qty: 4, lastPrice: 7.1, occurrences: 2 }],
+  });
+  store.close();
+});
+
+test('suggestReorder never syncs and never changes the cart', async () => {
+  const store = tempStore();
+  store.addItem('9', 'Pre-existing', 1, 1);
+  let synced = false;
+  const h = ramiLevyToolHandlers(store, historyClient({ syncCart: async (items: Record<string, string>) => { synced = true; return acceptAll(items); } }));
+  await h.suggestReorder({ numOrders: 2, minOccurrences: 1 });
+  assert.equal(synced, false);
+  assert.deepEqual(store.getItems().map((i) => i.productId), ['9']);
+  store.close();
+});
+
+test('suggestReorder includes a one-off item once minOccurrences drops to 1', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, historyClient());
+  const out = textOf(await h.suggestReorder({ numOrders: 2, minOccurrences: 1 }));
+  assert.deepEqual(out.candidates.map((c: { productId: string; occurrences: number }) => [c.productId, c.occurrences]), [['1', 2], ['2', 1]]);
+  store.close();
+});
+
+test('suggestReorder says so when nothing clears the threshold', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, historyClient());
+  const out = textOf(await h.suggestReorder({ numOrders: 2, minOccurrences: 2 }));
+  const empty = textOf(await ramiLevyToolHandlers(tempStore(), fakeClient()).suggestReorder({ numOrders: 1, minOccurrences: 1 }));
+  assert.equal(out.ok, true);
+  assert.deepEqual(empty.candidates, []);
+  assert.match(empty.message, /No items appear/);
+  store.close();
+});
+
+test('suggestReorder validates its bounds without calling the client', async () => {
+  const store = tempStore();
+  let called = false;
+  const client = historyClient({ getOrderList: async () => { called = true; return { ok: true, data: { orders: [], currentPage: 1, lastPage: 1, total: 0 } }; } });
+  const h = ramiLevyToolHandlers(store, client);
+  const tooMany = textOf(await h.suggestReorder({ numOrders: 51 }));
+  const impossible = textOf(await h.suggestReorder({ numOrders: 3, minOccurrences: 4 }));
+  assert.equal(called, false);
+  assert.equal(tooMany.reason, 'invalid_args');
+  assert.equal(impossible.reason, 'invalid_args');
+  store.close();
+});
+
+test('suggestReorder passes a client failure straight through', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, historyClient({ getOrderDetail: async () => ({ ok: false, reason: 'auth_expired', status: 401 }) }));
+  const out = textOf(await h.suggestReorder({ numOrders: 2, minOccurrences: 1 }));
+  assert.deepEqual(out, { ok: false, reason: 'auth_expired', status: 401 });
+  store.close();
+});
+
+test('suggestReorder and reorderFromHistory select the same products', async () => {
+  const store = tempStore();
+  const h = ramiLevyToolHandlers(store, historyClient());
+  const suggested = textOf(await h.suggestReorder({ numOrders: 2, minOccurrences: 2 }));
+  const applied = textOf(await h.reorderFromHistory({ numOrders: 2, minOccurrences: 2 }));
+  assert.deepEqual(
+    suggested.candidates.map((c: { productId: string; qty: number }) => [c.productId, c.qty]),
+    applied.added.map((a: { productId: string; qty: number }) => [a.productId, a.qty]),
+  );
+  store.close();
+});
+
+// --- money rounding: the API's own floats are not shown raw ---
+
+test('listOrders rounds a float-artifact total to agorot', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderList: async () => ({ ok: true, data: { orders: [{ id: 'o1', created_at: '2020-12-21', final_price: 442.22999999999996 }], currentPage: 1, lastPage: 1, total: 1 } }),
+  });
+  const out = textOf(await ramiLevyToolHandlers(store, client).listOrders({}));
+  assert.equal(out.orders[0].total, 442.23);
+  store.close();
+});
+
+test('viewOrder rounds money but leaves a weight-based qty alone', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderDetail: async () => ({
+      ok: true,
+      data: { id: 'o1', final_price: 10.000000000000002, lines: [{ item_id: 4, name: 'גזר ארוז', price: '2.9', quantity: 1.234, total_price: 3.5779999999999994 }] },
+    }),
+  });
+  const out = textOf(await ramiLevyToolHandlers(store, client).viewOrder({ orderId: 'o1' }));
+  assert.equal(out.total, 10);
+  assert.deepEqual(out.lines, [{ productId: '4', name: 'גזר ארוז', price: 2.9, qty: 1.234, lineTotal: 3.58 }]);
+  store.close();
+});
