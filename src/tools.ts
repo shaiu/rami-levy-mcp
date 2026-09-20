@@ -21,6 +21,15 @@ const VIEW_CART_SCOPE =
   'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: ' +
   'the API has no way to read the cart back.';
 
+// The merge into the browser's own cart runs on checkout page load, so a
+// checkout tab that was already open when the cart changed keeps showing the
+// pre-change contents — which reads like the change silently failed. Saying so
+// in the payload, not just in the tool description, is what stops the agent
+// from sending the user to a stale page.
+const CHECKOUT_HINT =
+  'The site merges this cart into the browser only when the checkout page loads, so a checkout page ' +
+  'opened before the last change still shows the old contents — reload it.';
+
 export interface ResetAfterOrder {
   orderId: string | number;
   createdAt: string;
@@ -36,8 +45,9 @@ export interface ResetAfterOrder {
 //   existed): nothing to detect, and no network call.
 // - Order-list failure: returned as-is, and the caller must not mutate. A
 //   check that can't run is never treated as "no new order".
-// - Comparison: last_synced_at is a UTC instant; created_at is naive Israel
-//   time, converted to a UTC instant with the real Asia/Jerusalem rules (see
+// - Comparison: last_synced_at is a UTC instant; created_at arrives either
+//   zoned (ISO-8601 with Z, what the live API sends today) or as a naive
+//   Israel-time string, and is resolved to a UTC instant either way (see
 //   time.ts). A created_at that can't be parsed is an error, not a skip.
 async function detectCheckout(
   store: CartStore,
@@ -163,6 +173,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         total: store.getTotal(),
         scope: VIEW_CART_SCOPE,
         checkoutUrl: CHECKOUT_URL,
+        checkoutHint: CHECKOUT_HINT,
       });
     },
 
@@ -306,7 +317,9 @@ const CART_SYNC_NOTE =
   'ok:false with a transport reason means nothing changed. reason items_rejected means the server refused the listed products; ' +
   'they have been removed from the cart too, so tell the user and pick alternatives. ' +
   'If resetAfterOrder {orderId, createdAt} is present, an order was placed since the last sync, so the items from before it were ' +
-  'treated as bought and cleared first; tell the user the cart started fresh after that order.';
+  'treated as bought and cleared first; tell the user the cart started fresh after that order. ' +
+  'A change made while the user already has the checkout page open is not visible there until they reload it — say so rather than ' +
+  'letting them read a stale page as a failed change.';
 
 export const RAMI_LEVY_TOOL_NAMES = [
   'rami_levy_search_products',
@@ -346,7 +359,8 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
     {
       description: 'Show this tool\'s own list of what it has put in the cart since the last checkout, with a running total and the checkout URL. ' +
         'This is NOT a read of the Rami Levy website cart: the API has no way to read the cart back, so anything added, removed or emptied on the website is not visible here (see `scope`). ' +
-        'Reads local state only — no network call. Give the user the checkout URL: the Rami Levy site shows these items once its checkout page loads, not on the home-page cart icon.',
+        'Reads local state only — no network call. Give the user the checkout URL: the Rami Levy site shows these items once its checkout page loads, ' +
+        'not on the home-page cart icon — and an already-open checkout page needs a reload (see `checkoutHint`).',
       inputSchema: {},
     },
     withErrorBoundary(h.viewCart),

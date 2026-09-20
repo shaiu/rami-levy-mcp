@@ -1,8 +1,15 @@
-// Rami Levy's order `created_at` is a naive wall-clock string in Israel time
-// ("2026-09-08 10:15:00", no offset), while this server records its own sync
-// times as UTC instants. To compare them, the order time is converted to a
-// UTC instant here, using the real Asia/Jerusalem rules from Intl, never a
-// fixed offset: Israel is UTC+2 in winter and UTC+3 in summer (IDT).
+// Rami Levy's order `created_at` has been seen in two shapes, and this server
+// records its own sync times as UTC instants, so both have to land on a UTC
+// instant to be comparable:
+//
+//   - Zoned ISO-8601 ("2026-09-08T05:59:37.000000Z") — what the live API
+//     returns as of 2026-09-20. Taken at its word; no conversion.
+//   - A naive wall-clock string in Israel time ("2026-09-08 10:15:00", no
+//     offset). Converted here using the real Asia/Jerusalem rules from Intl,
+//     never a fixed offset: Israel is UTC+2 in winter and UTC+3 in summer.
+//
+// Keep the naive branch: it is what makes this safe if the API reverts to
+// offset-less strings, not dead code to tidy away.
 //
 // Ambiguity: when the clocks fall back in late October, one local hour
 // happens twice; a time inside it resolves to one of its two readings, so an
