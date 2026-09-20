@@ -27,6 +27,15 @@ function numberOrNull(value: unknown): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
+// Money specifically: the API's own totals carry binary-float artifacts
+// (a real order came back as 442.22999999999996), so anything shown as money
+// is rounded to agorot. Quantities go through numberOrNull instead — a
+// weight-based line is legitimately 1.234 kg and must not be rounded.
+function moneyOrNull(value: unknown): number | null {
+  const n = numberOrNull(value);
+  return n === null ? null : Math.round(n * 100) / 100;
+}
+
 const VIEW_CART_SCOPE =
   'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: ' +
   'the API has no way to read the cart back.';
@@ -88,6 +97,96 @@ async function detectCheckout(
     }
   }
   return { ok: true, reset: newest?.order ?? null };
+}
+
+export interface ReorderCandidate {
+  productId: string;
+  name: string;
+  // The median of the quantities bought across the orders that carried it —
+  // robust to the one time six were bought.
+  qty: number;
+  // The price from the most recent order that carried it, which is not
+  // necessarily today's price. Null when no order line carried a usable one.
+  lastPrice: number | null;
+  // How many of the considered orders carried it.
+  occurrences: number;
+}
+
+function validateReorderBounds(numOrders: number, minOccurrences: number): Record<string, unknown> | null {
+  if (numOrders < 1 || numOrders > 50) {
+    return { ok: false, reason: 'invalid_args', message: 'numOrders must be between 1 and 50' };
+  }
+  if (minOccurrences < 1 || minOccurrences > numOrders) {
+    return { ok: false, reason: 'invalid_args', message: `minOccurrences must be between 1 and ${numOrders}` };
+  }
+  return null;
+}
+
+// The reorder selection, with no side effects: page through the history, read
+// the newest `numOrders` orders in full, and tally which products recur.
+//
+// Read-only on purpose — rami_levy_suggest_reorder returns this as-is, and
+// rami_levy_reorder_from_history applies the same result to the cart, so the
+// preview and the write can never disagree about what would be added.
+//
+// It is deterministic counting over ~10 orders of ~70 lines each, which is why
+// it lives here rather than being left to an agent to re-derive from
+// list_orders/view_order output.
+async function scanReorderHistory(
+  client: RamiLevyClient,
+  numOrders: number,
+  minOccurrences: number,
+): Promise<{ ok: true; ordersConsidered: number; candidates: ReorderCandidate[] } | ClientError> {
+  const summaries: { id: string | number; created_at: string }[] = [];
+  let page = 1;
+  while (summaries.length < numOrders) {
+    const result = await client.getOrderList(page);
+    if (!result.ok) return result;
+    summaries.push(...result.data.orders);
+    if (page >= result.data.lastPage) break;
+    page++;
+  }
+  summaries.sort((a, b) => b.created_at.localeCompare(a.created_at));
+  const selected = summaries.slice(0, numOrders);
+
+  // `selected` is sorted newest-first, so the first line seen for a given
+  // item_id (across orders, in this loop's iteration order) always comes
+  // from the most recent order that carried it — that's where `price`
+  // is captured from.
+  const stats = new Map<string, { name: string; qtys: number[]; orders: Set<string>; price?: number }>();
+  for (const summary of selected) {
+    const detail = await client.getOrderDetail(summary.id);
+    if (!detail.ok) return detail;
+    for (const line of detail.data.lines) {
+      // A line whose quantity isn't a positive finite number can't be
+      // reordered meaningfully, so it's skipped entirely rather than
+      // polluting the median or counting as an occurrence.
+      const qty = numberOrNull(line.quantity);
+      if (qty === null || qty <= 0) continue;
+
+      const id = String(line.item_id);
+      let rec = stats.get(id);
+      if (!rec) {
+        rec = { name: line.name, qtys: [], orders: new Set() };
+        stats.set(id, rec);
+      }
+      rec.qtys.push(qty);
+      rec.orders.add(String(summary.id));
+      if (rec.price === undefined) {
+        const price = moneyOrNull(line.price);
+        if (price !== null) rec.price = price;
+      }
+    }
+  }
+
+  const candidates: ReorderCandidate[] = [];
+  for (const [id, rec] of stats) {
+    if (rec.orders.size < minOccurrences) continue;
+    const sorted = [...rec.qtys].sort((a, b) => a - b);
+    const median = sorted[Math.floor(sorted.length / 2)];
+    candidates.push({ productId: id, name: rec.name, qty: median, lastPrice: rec.price ?? null, occurrences: rec.orders.size });
+  }
+  return { ok: true, ordersConsidered: selected.length, candidates };
 }
 
 // The one path every cart-mutating tool goes through. It first checks for a
@@ -221,7 +320,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
           createdAt: o.created_at,
           supplyAt: o.supply_at ?? null,
           status: o.status_api ?? null,
-          total: numberOrNull(o.final_price),
+          total: moneyOrNull(o.final_price),
         })),
       });
     },
@@ -236,81 +335,63 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         createdAt: order.created_at ?? null,
         supplyAt: order.supply_at ?? null,
         status: order.status_api ?? null,
-        total: numberOrNull(order.final_price),
-        deliveryPrice: numberOrNull(order.delivery_price),
+        total: moneyOrNull(order.final_price),
+        deliveryPrice: moneyOrNull(order.delivery_price),
         lineCount: order.lines.length,
         lines: order.lines.map((line) => ({
           productId: String(line.item_id),
           name: line.name,
-          price: numberOrNull(line.price),
+          price: moneyOrNull(line.price),
           qty: numberOrNull(line.quantity),
-          lineTotal: numberOrNull(line.total_price),
+          lineTotal: moneyOrNull(line.total_price),
         })),
       });
+    },
+
+    async suggestReorder(args: { numOrders?: number; minOccurrences?: number }): Promise<Content> {
+      const numOrders = args.numOrders ?? 10;
+      const minOccurrences = args.minOccurrences ?? 3;
+      const invalid = validateReorderBounds(numOrders, minOccurrences);
+      if (invalid) return json(invalid);
+
+      const scan = await scanReorderHistory(client, numOrders, minOccurrences);
+      if (!scan.ok) return json(scan);
+
+      // Most-repeated first: the ones the user is surest to want are the ones
+      // worth reading first in a list they're being asked to approve.
+      const candidates = [...scan.candidates].sort((a, b) => b.occurrences - a.occurrences || a.name.localeCompare(b.name));
+      if (candidates.length === 0) {
+        return json({
+          ok: true,
+          ordersConsidered: scan.ordersConsidered,
+          minOccurrences,
+          candidates: [],
+          message: `No items appear in ${minOccurrences}+ of the last ${scan.ordersConsidered} orders`,
+        });
+      }
+      return json({ ok: true, ordersConsidered: scan.ordersConsidered, minOccurrences, candidates });
     },
 
     async reorderFromHistory(args: { numOrders?: number; minOccurrences?: number }): Promise<Content> {
       const numOrders = args.numOrders ?? 10;
       const minOccurrences = args.minOccurrences ?? 3;
-      if (numOrders < 1 || numOrders > 50) {
-        return json({ ok: false, reason: 'invalid_args', message: 'numOrders must be between 1 and 50' });
-      }
-      if (minOccurrences < 1 || minOccurrences > numOrders) {
-        return json({ ok: false, reason: 'invalid_args', message: `minOccurrences must be between 1 and ${numOrders}` });
-      }
+      const invalid = validateReorderBounds(numOrders, minOccurrences);
+      if (invalid) return json(invalid);
 
-      const summaries: { id: string | number; created_at: string }[] = [];
-      let page = 1;
-      while (summaries.length < numOrders) {
-        const result = await client.getOrderList(page);
-        if (!result.ok) return json(result);
-        summaries.push(...result.data.orders);
-        if (page >= result.data.lastPage) break;
-        page++;
-      }
-      summaries.sort((a, b) => b.created_at.localeCompare(a.created_at));
-      const selected = summaries.slice(0, numOrders);
+      const scan = await scanReorderHistory(client, numOrders, minOccurrences);
+      if (!scan.ok) return json(scan);
 
-      // `selected` is sorted newest-first, so the first line seen for a given
-      // item_id (across orders, in this loop's iteration order) always comes
-      // from the most recent order that carried it — that's where `price`
-      // is captured from.
-      const stats = new Map<string, { name: string; qtys: number[]; orders: Set<string>; price?: number }>();
-      for (const summary of selected) {
-        const detail = await client.getOrderDetail(summary.id);
-        if (!detail.ok) return json(detail);
-        for (const line of detail.data.lines) {
-          // A line whose quantity isn't a positive finite number can't be
-          // reordered meaningfully, so it's skipped entirely rather than
-          // polluting the median or counting as an occurrence.
-          const qty = numberOrNull(line.quantity);
-          if (qty === null || qty <= 0) continue;
-
-          const id = String(line.item_id);
-          let rec = stats.get(id);
-          if (!rec) {
-            rec = { name: line.name, qtys: [], orders: new Set() };
-            stats.set(id, rec);
-          }
-          rec.qtys.push(qty);
-          rec.orders.add(String(summary.id));
-          if (rec.price === undefined) {
-            const price = numberOrNull(line.price);
-            if (price !== null) rec.price = price;
-          }
-        }
-      }
-
-      const added: { productId: string; name: string; qty: number; price?: number }[] = [];
-      for (const [id, rec] of stats) {
-        if (rec.orders.size < minOccurrences) continue;
-        const sorted = [...rec.qtys].sort((a, b) => a - b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        added.push({ productId: id, name: rec.name, qty: median, price: rec.price });
-      }
+      // `price` is omitted rather than null when no order line carried one, so
+      // `apply` below can fall back through `?? existing?.price ?? 0`.
+      const added = scan.candidates.map((c) => ({
+        productId: c.productId,
+        name: c.name,
+        qty: c.qty,
+        ...(c.lastPrice === null ? {} : { price: c.lastPrice }),
+      }));
 
       if (added.length === 0) {
-        return json({ ok: true, added: [], message: `No items appear in ${minOccurrences}+ of the last ${selected.length} orders` });
+        return json({ ok: true, added: [], message: `No items appear in ${minOccurrences}+ of the last ${scan.ordersConsidered} orders` });
       }
 
       const apply = () => {
@@ -367,6 +448,12 @@ const PRICE = z.number().nonnegative();
 const QTY = z.number().positive().optional();
 const LIMIT = z.number().int().min(1).max(50).optional();
 const ORDER_ID = z.string().min(1);
+// Shared by suggest_reorder and reorder_from_history so the preview and the
+// write can't drift apart on what they accept. The relationship between the
+// two (minOccurrences <= numOrders) is checked in validateReorderBounds,
+// which both handlers call.
+const NUM_ORDERS = z.number().int().min(1).max(50).optional();
+const MIN_OCCURRENCES = z.number().int().min(1).optional();
 // Unbounded above on purpose: the history is as long as it is (140 orders /
 // 24 pages on a real account), and a page past the end comes back empty
 // rather than as an error.
@@ -382,6 +469,7 @@ const CART_SYNC_NOTE =
   'letting them read a stale page as a failed change.';
 
 export const RAMI_LEVY_TOOL_NAMES = [
+  'rami_levy_suggest_reorder',
   'rami_levy_list_orders',
   'rami_levy_view_order',
   'rami_levy_search_products',
@@ -449,10 +537,22 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
   server.registerTool(
     'rami_levy_reorder_from_history',
     {
-      description: 'Look at the last numOrders (default 10, max 50) real orders, find items that appear in at least minOccurrences (default 3) of them, and add each at its median past quantity. ADDS onto whatever is already in the cart — it does not replace it. ' + CART_SYNC_NOTE,
-      inputSchema: { numOrders: z.number().int().min(1).max(50).optional(), minOccurrences: z.number().int().min(1).optional() },
+      description: 'Look at the last numOrders (default 10, max 50) real orders, find items that appear in at least minOccurrences (default 3) of them, and add each at its median past quantity. ADDS onto whatever is already in the cart — it does not replace it. ' +
+        'This writes to the real account immediately and there is no undo beyond remove_item, so unless the user has asked for a blind reorder, run rami_levy_suggest_reorder first and let them approve the list. ' + CART_SYNC_NOTE,
+      inputSchema: { numOrders: NUM_ORDERS, minOccurrences: MIN_OCCURRENCES },
     },
     withErrorBoundary(h.reorderFromHistory),
+  );
+
+  server.registerTool(
+    'rami_levy_suggest_reorder',
+    {
+      description: 'Work out what a reorder WOULD add, and return it without touching the cart. Same selection as rami_levy_reorder_from_history: products appearing in at least minOccurrences (default 3) of the last numOrders (default 10) orders, at the median quantity bought. ' +
+        'Each candidate carries occurrences (how many of those orders had it), qty and lastPrice (the price from the most recent order that carried it — not necessarily today\'s), so the user can be shown WHY something is proposed. Most-repeated first. ' +
+        'Prefer this before rami_levy_reorder_from_history whenever the user has not already approved a blind reorder: show the list, let them drop what they do not want, then add the rest with rami_levy_add_item. Read-only.',
+      inputSchema: { numOrders: NUM_ORDERS, minOccurrences: MIN_OCCURRENCES },
+    },
+    withErrorBoundary(h.suggestReorder),
   );
 
   server.registerTool(

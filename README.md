@@ -50,8 +50,13 @@ cookie (hours to a few days) and an expired one most likely shows up as
 `blocked_by_cloudflare` (a challenge page). Either way, repeat the capture
 above first.
 
-## The 9 tools
+## The 10 tools
 
+- `rami_levy_suggest_reorder(numOrders?, minOccurrences?)` — what a reorder
+  *would* add, without touching the cart. Same selection as
+  `reorder_from_history`, but each candidate carries `occurrences`, `qty`
+  (median) and `lastPrice`, so the user can be shown why something is
+  proposed and drop what they don't want before anything is added. Read-only.
 - `rami_levy_list_orders(page?)` — one page of past orders, newest first:
   `orderId`, `createdAt`, `supplyAt` (delivery slot), `status`, and `total`
   (what was charged, delivery fee included). The response carries `page`,
@@ -75,7 +80,10 @@ above first.
   product is priced at the last price paid — the price from the most recent
   order line that carried it — which may differ from today's price. `view_cart`'s
   `total` is therefore only an estimate until the cart is synced; `serverTotal`
-  (returned by every cart-mutating tool) is the authoritative number.
+  (returned by every cart-mutating tool) is the authoritative number. It shares
+  its selection with `suggest_reorder` — one implementation, so the preview and
+  the write can't disagree — and writes to the real account immediately, so
+  prefer previewing first unless a blind reorder was asked for.
 - `rami_levy_check_status()` — probes both the catalog search and page 1 of
   the order history (which needs the logged-in session); returns the first
   failure, else `{ ok: true, cartSize }`.
@@ -190,6 +198,23 @@ It works only if the response echoes `"q":"milk"` (not `"q":null`) **and**
 contains product data. A `200` with `"q":null` means the query was ignored
 (the wire format is wrong). An HTML body, at any status, is a Cloudflare
 challenge: recapture the bundle and retry before blaming your egress.
+
+## The shopping skill
+
+`skills/rami-levy-shop/SKILL.md` carries the *workflow* the tools deliberately
+don't: preview with `suggest_reorder` before writing, present the candidates
+and let the user cut them, then add what survived — plus the cart/website
+distinction, the Hebrew-search rule, and what to do about each error `reason`.
+The tools stay mechanism; the skill is policy, so changing how a shop is run
+doesn't mean shipping code.
+
+For Claude Code, point a user skill at it:
+
+```bash
+ln -s "$PWD/skills/rami-levy-shop" ~/.claude/skills/rami-levy-shop
+```
+
+A symlink rather than a copy, so `git pull` updates the skill too.
 
 ## Installing into NanoClaw
 
