@@ -646,3 +646,138 @@ test('checkout detection uses Israel summer time (UTC+3) for a July order', asyn
   assert.deepEqual(store.getItems().map((i) => i.productId), ['1', '2']);
   store.close();
 });
+
+// --- listOrders / viewOrder: read-only windows onto the purchase history ---
+
+test('listOrders maps a page of summaries and its pagination', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderList: async (page: number) => ({
+      ok: true,
+      data: {
+        orders: [
+          { id: 9197912, created_at: '2026-09-08T05:59:37.000000Z', supply_at: '2026-09-09 12:00:00', status_api: 'done', final_price: 1313.13 },
+        ],
+        currentPage: page,
+        lastPage: 24,
+        total: 140,
+      },
+    }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.listOrders({ page: 3 }));
+  assert.deepEqual(out, {
+    ok: true,
+    page: 3,
+    lastPage: 24,
+    totalOrders: 140,
+    orders: [{ orderId: 9197912, createdAt: '2026-09-08T05:59:37.000000Z', supplyAt: '2026-09-09 12:00:00', status: 'done', total: 1313.13 }],
+  });
+  store.close();
+});
+
+test('listOrders defaults to page 1 and asks the client for it', async () => {
+  const store = tempStore();
+  let askedFor: number | undefined;
+  const client = fakeClient({
+    getOrderList: async (page: number) => {
+      askedFor = page;
+      return { ok: true, data: { orders: [], currentPage: page, lastPage: 1, total: 0 } };
+    },
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.listOrders({}));
+  assert.equal(askedFor, 1);
+  assert.equal(out.ok, true);
+  assert.deepEqual(out.orders, []);
+  store.close();
+});
+
+test('listOrders rejects a page below 1 without calling the client', async () => {
+  const store = tempStore();
+  let called = false;
+  const client = fakeClient({
+    getOrderList: async () => { called = true; return { ok: true, data: { orders: [], currentPage: 1, lastPage: 1, total: 0 } }; },
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.listOrders({ page: 0 }));
+  assert.equal(called, false);
+  assert.equal(out.ok, false);
+  assert.equal(out.reason, 'invalid_args');
+  store.close();
+});
+
+test('listOrders passes a client failure straight through', async () => {
+  const store = tempStore();
+  const client = fakeClient({ getOrderList: async () => ({ ok: false, reason: 'auth_expired', status: 401 }) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.listOrders({}));
+  assert.deepEqual(out, { ok: false, reason: 'auth_expired', status: 401 });
+  store.close();
+});
+
+test('listOrders fills missing optional summary fields with null', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderList: async () => ({ ok: true, data: { orders: [{ id: 'o1', created_at: '2026-09-01' }], currentPage: 1, lastPage: 1, total: 1 } }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.listOrders({}));
+  assert.deepEqual(out.orders, [{ orderId: 'o1', createdAt: '2026-09-01', supplyAt: null, status: null, total: null }]);
+  store.close();
+});
+
+test('viewOrder returns the order lines with numeric price and qty', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderDetail: async (orderId: string | number) => ({
+      ok: true,
+      data: {
+        id: String(orderId),
+        created_at: '2026-09-08T05:59:37.000000Z',
+        supply_at: '2026-09-09 12:00:00',
+        status_api: 'done',
+        final_price: 1313.13,
+        delivery_price: '35.9',
+        lines: [
+          { id: 1, item_id: 2, name: 'עגבניה', price: '4.9', quantity: 2, total_price: '9.8' },
+        ],
+      },
+    }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.viewOrder({ orderId: '9197912' }));
+  assert.deepEqual(out, {
+    ok: true,
+    orderId: '9197912',
+    createdAt: '2026-09-08T05:59:37.000000Z',
+    supplyAt: '2026-09-09 12:00:00',
+    status: 'done',
+    total: 1313.13,
+    deliveryPrice: 35.9,
+    lineCount: 1,
+    lines: [{ productId: '2', name: 'עגבניה', price: 4.9, qty: 2, lineTotal: 9.8 }],
+  });
+  store.close();
+});
+
+test('viewOrder nulls a line price that the old order data lacks', async () => {
+  const store = tempStore();
+  const client = fakeClient({
+    getOrderDetail: async () => ({ ok: true, data: { id: 'o1', lines: [{ id: 1, item_id: 7, name: 'Old item', quantity: 1 }] } }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.viewOrder({ orderId: 'o1' }));
+  assert.deepEqual(out.lines, [{ productId: '7', name: 'Old item', price: null, qty: 1, lineTotal: null }]);
+  assert.equal(out.total, null);
+  store.close();
+});
+
+test('viewOrder passes a client failure straight through', async () => {
+  const store = tempStore();
+  const client = fakeClient({ getOrderDetail: async () => ({ ok: false, reason: 'blocked_by_cloudflare' }) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.viewOrder({ orderId: 'o1' }));
+  assert.deepEqual(out, { ok: false, reason: 'blocked_by_cloudflare' });
+  store.close();
+});

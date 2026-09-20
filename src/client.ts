@@ -20,6 +20,14 @@ export interface OrderSummary {
   // Measured live (2026-09-18): the real API returns this as a number.
   id: string | number;
   created_at: string;
+  // Measured live (2026-09-20): the paginator also carries the delivery slot,
+  // the order's state and what was actually charged. The client passes the
+  // summary objects through untouched, so these need no parsing — they are
+  // optional because only `id` and `created_at` are relied on (reorder needs
+  // nothing else) and older order data may omit them.
+  supply_at?: string;
+  status_api?: string;
+  final_price?: number | string;
 }
 
 export interface OrderListResult {
@@ -32,6 +40,9 @@ export interface OrderListResult {
 export interface OrderLine {
   item_id: string | number;
   name: string;
+  // Measured live (2026-09-20): what this line actually came to. Optional for
+  // the same reason as `price` — older order data may not carry it.
+  total_price?: string | number;
   // Measured live (2026-09-18): the real API returns this as a number.
   quantity: string | number;
   // Measured live (2026-09-18): present as a string on current orders, but
@@ -42,6 +53,15 @@ export interface OrderLine {
 export interface OrderDetail {
   id: string;
   lines: OrderLine[];
+  // As with OrderSummary, the detail object is passed through untouched; these
+  // are the order-level fields worth surfacing, optional because only `lines`
+  // is relied on. `delivery_price` is the fee that `final_price` includes and
+  // the cart's own `serverTotal` excludes.
+  created_at?: string;
+  supply_at?: string;
+  status_api?: string;
+  final_price?: number | string;
+  delivery_price?: number | string;
 }
 
 export type ClientError =

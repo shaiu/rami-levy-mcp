@@ -17,6 +17,16 @@ function cartPayload(store: CartStore): Record<string, string> {
   return payload;
 }
 
+// Order money and quantities arrive as numbers on some fields and strings on
+// others ("4.9"), and older orders omit them outright — so anything shown to
+// the user is coerced once here, and an unusable value is reported as null
+// rather than as NaN or a silent 0.
+function numberOrNull(value: unknown): number | null {
+  if (value === undefined || value === null || value === '') return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
 const VIEW_CART_SCOPE =
   'Items this tool has added since the last checkout. Changes made on the Rami Levy website are not visible: ' +
   'the API has no way to read the cart back.';
@@ -194,6 +204,51 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       return json(await mutateAndSync(store, client, () => store.clear()));
     },
 
+    async listOrders(args: { page?: number }): Promise<Content> {
+      const page = args.page ?? 1;
+      if (!Number.isInteger(page) || page < 1) {
+        return json({ ok: false, reason: 'invalid_args', message: 'page must be an integer of 1 or more' });
+      }
+      const result = await client.getOrderList(page);
+      if (!result.ok) return json(result);
+      return json({
+        ok: true,
+        page: result.data.currentPage,
+        lastPage: result.data.lastPage,
+        totalOrders: result.data.total,
+        orders: result.data.orders.map((o) => ({
+          orderId: o.id,
+          createdAt: o.created_at,
+          supplyAt: o.supply_at ?? null,
+          status: o.status_api ?? null,
+          total: numberOrNull(o.final_price),
+        })),
+      });
+    },
+
+    async viewOrder(args: { orderId: string }): Promise<Content> {
+      const result = await client.getOrderDetail(args.orderId);
+      if (!result.ok) return json(result);
+      const order = result.data;
+      return json({
+        ok: true,
+        orderId: args.orderId,
+        createdAt: order.created_at ?? null,
+        supplyAt: order.supply_at ?? null,
+        status: order.status_api ?? null,
+        total: numberOrNull(order.final_price),
+        deliveryPrice: numberOrNull(order.delivery_price),
+        lineCount: order.lines.length,
+        lines: order.lines.map((line) => ({
+          productId: String(line.item_id),
+          name: line.name,
+          price: numberOrNull(line.price),
+          qty: numberOrNull(line.quantity),
+          lineTotal: numberOrNull(line.total_price),
+        })),
+      });
+    },
+
     async reorderFromHistory(args: { numOrders?: number; minOccurrences?: number }): Promise<Content> {
       const numOrders = args.numOrders ?? 10;
       const minOccurrences = args.minOccurrences ?? 3;
@@ -228,8 +283,8 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
           // A line whose quantity isn't a positive finite number can't be
           // reordered meaningfully, so it's skipped entirely rather than
           // polluting the median or counting as an occurrence.
-          const qty = Number(line.quantity);
-          if (!Number.isFinite(qty) || qty <= 0) continue;
+          const qty = numberOrNull(line.quantity);
+          if (qty === null || qty <= 0) continue;
 
           const id = String(line.item_id);
           let rec = stats.get(id);
@@ -240,8 +295,8 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
           rec.qtys.push(qty);
           rec.orders.add(String(summary.id));
           if (rec.price === undefined) {
-            const price = Number(line.price);
-            if (Number.isFinite(price)) rec.price = price;
+            const price = numberOrNull(line.price);
+            if (price !== null) rec.price = price;
           }
         }
       }
@@ -311,6 +366,11 @@ const NAME = z.string().min(1);
 const PRICE = z.number().nonnegative();
 const QTY = z.number().positive().optional();
 const LIMIT = z.number().int().min(1).max(50).optional();
+const ORDER_ID = z.string().min(1);
+// Unbounded above on purpose: the history is as long as it is (140 orders /
+// 24 pages on a real account), and a page past the end comes back empty
+// rather than as an error.
+const PAGE = z.number().int().min(1).optional();
 
 const CART_SYNC_NOTE =
   'Returns cartTotal (local estimate) and serverTotal (Rami Levy\'s own total — authoritative). ' +
@@ -322,6 +382,8 @@ const CART_SYNC_NOTE =
   'letting them read a stale page as a failed change.';
 
 export const RAMI_LEVY_TOOL_NAMES = [
+  'rami_levy_list_orders',
+  'rami_levy_view_order',
   'rami_levy_search_products',
   'rami_levy_add_item',
   'rami_levy_view_cart',
@@ -391,6 +453,29 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       inputSchema: { numOrders: z.number().int().min(1).max(50).optional(), minOccurrences: z.number().int().min(1).optional() },
     },
     withErrorBoundary(h.reorderFromHistory),
+  );
+
+  server.registerTool(
+    'rami_levy_list_orders',
+    {
+      description: 'List one page of the account\'s past orders, newest first: orderId, createdAt (ISO-8601 UTC), supplyAt (the delivery slot, Israel local time), status and total (what was charged, delivery fee included). ' +
+        'Paginated — the response carries page, lastPage and totalOrders, so ask for page 2, 3, … to go further back. Read-only: it never touches the cart. ' +
+        'Pass an orderId to rami_levy_view_order to see what was in that order.',
+      inputSchema: { page: PAGE },
+    },
+    withErrorBoundary(h.listOrders),
+  );
+
+  server.registerTool(
+    'rami_levy_view_order',
+    {
+      description: 'Show one past order in full: every line with productId, name, unit price, qty and lineTotal, plus the order\'s own total, delivery fee, status and delivery slot. ' +
+        'The orderId comes from rami_levy_list_orders. Read-only: it never touches the cart. ' +
+        'A price, qty or total the order data does not carry is reported as null rather than 0. ' +
+        'productId is the same id rami_levy_add_item takes, so a line can be re-added directly — but its price is what was paid then, not today\'s.',
+      inputSchema: { orderId: ORDER_ID },
+    },
+    withErrorBoundary(h.viewOrder),
   );
 
   server.registerTool(

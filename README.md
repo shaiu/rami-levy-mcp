@@ -50,8 +50,19 @@ cookie (hours to a few days) and an expired one most likely shows up as
 `blocked_by_cloudflare` (a challenge page). Either way, repeat the capture
 above first.
 
-## The 7 tools
+## The 9 tools
 
+- `rami_levy_list_orders(page?)` — one page of past orders, newest first:
+  `orderId`, `createdAt`, `supplyAt` (delivery slot), `status`, and `total`
+  (what was charged, delivery fee included). The response carries `page`,
+  `lastPage` and `totalOrders`; a real account runs to 140 orders over 24
+  pages, 6 per page. Read-only.
+- `rami_levy_view_order(orderId)` — one order in full: every line with
+  `productId`, `name`, unit `price`, `qty` (decimal for weight-based items)
+  and `lineTotal`, plus the order's `total`, `deliveryPrice`, `status` and
+  slot. A value the order data doesn't carry is `null`, never `0`.
+  `productId` is what `add_item` takes, so a line can be re-added directly —
+  at the price paid then, not today's. Read-only.
 - `rami_levy_search_products(query, limit?)`
 - `rami_levy_add_item(productId, name, price, qty?)`
 - `rami_levy_view_cart()` — this tool's own list of what it has put in the
