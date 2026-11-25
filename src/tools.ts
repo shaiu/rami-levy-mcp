@@ -275,6 +275,20 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       return json(await mutateAndSync(store, client, () => store.addItem(args.productId, args.name, args.price, qty)));
     },
 
+    // Many products in one cart change: one checkout check and one sync, instead
+    // of one of each per product. A product listed twice adds up, as add_item
+    // does across calls.
+    async addItems(args: { items: { productId: string; name: string; price: number; qty?: number }[] }): Promise<Content> {
+      const items = args.items.map((i) => ({ ...i, qty: i.qty ?? 1 }));
+      if (items.length === 0 || items.length > MAX_BATCH) {
+        return json({ ok: false, reason: 'invalid_args', message: `items must hold 1 to ${MAX_BATCH} products` });
+      }
+      const added = items.map(({ productId, name, qty }) => ({ productId, name, qty }));
+      return json(await mutateAndSync(store, client, () => {
+        for (const i of items) store.addItem(i.productId, i.name, i.price, i.qty);
+      }, { added }));
+    },
+
     async viewCart(): Promise<Content> {
       return json({
         ok: true,
@@ -448,6 +462,7 @@ const PRICE = z.number().nonnegative();
 const QTY = z.number().positive().optional();
 const LIMIT = z.number().int().min(1).max(50).optional();
 const ORDER_ID = z.string().min(1);
+const MAX_BATCH = 100;
 // Shared by suggest_reorder and reorder_from_history so the preview and the
 // write can't drift apart on what they accept. The relationship between the
 // two (minOccurrences <= numOrders) is checked in validateReorderBounds,
@@ -474,6 +489,7 @@ export const RAMI_LEVY_TOOL_NAMES = [
   'rami_levy_view_order',
   'rami_levy_search_products',
   'rami_levy_add_item',
+  'rami_levy_add_items',
   'rami_levy_view_cart',
   'rami_levy_remove_item',
   'rami_levy_clear_cart',
@@ -502,6 +518,18 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       inputSchema: { productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY },
     },
     withErrorBoundary(h.addItem),
+  );
+
+  server.registerTool(
+    'rami_levy_add_items',
+    {
+      description: 'Add several products to the shared cart in one step: the same as calling rami_levy_add_item for each, but with a single sync to the real account, ' +
+        `so prefer it whenever more than one product is being added (up to ${MAX_BATCH}). Each item takes productId, name and price from a prior search, order or reorder suggestion, and an optional qty (default 1). ` +
+        'Quantities ADD to what is already in the cart, and a product listed twice adds up. The result lists `added`; if the server refuses some products, ' +
+        'reason is items_rejected and `rejected` names them, while the rest stay added. ' + CART_SYNC_NOTE,
+      inputSchema: { items: z.array(z.object({ productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY })).min(1).max(MAX_BATCH) },
+    },
+    withErrorBoundary(h.addItems),
   );
 
   server.registerTool(

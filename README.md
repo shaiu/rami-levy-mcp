@@ -50,7 +50,7 @@ cookie (hours to a few days) and an expired one most likely shows up as
 `blocked_by_cloudflare` (a challenge page). Either way, repeat the capture
 above first.
 
-## The 10 tools
+## The 11 tools
 
 - `rami_levy_suggest_reorder(numOrders?, minOccurrences?)` — what a reorder
   *would* add, without touching the cart. Same selection as
@@ -70,6 +70,9 @@ above first.
   at the price paid then, not today's. Read-only.
 - `rami_levy_search_products(query, limit?)`
 - `rami_levy_add_item(productId, name, price, qty?)`
+- `rami_levy_add_items(items)`: several products, each `{productId, name, price, qty?}`, with one
+  sync for all of them instead of one per product (up to 100). A product listed
+  twice adds up.
 - `rami_levy_view_cart()` — this tool's own list of what it has put in the
   cart since the last checkout, not a read of the website cart (see below).
   The response carries a `scope` field saying so.
@@ -88,7 +91,7 @@ above first.
   the order history (which needs the logged-in session); returns the first
   failure, else `{ ok: true, cartSize }`.
 
-Every cart-mutating tool (`add_item`, `remove_item`, `clear_cart`,
+Every cart-mutating tool (`add_item`, `add_items`, `remove_item`, `clear_cart`,
 `reorder_from_history`) syncs the whole cart to the real account and returns
 `cartTotal` (local estimate), `itemCount`, and `serverTotal` (Rami Levy's own
 total from the sync response, `null` if it gave none). If the sync fails at
@@ -130,7 +133,7 @@ changes outside this tool:
 
 - **Checkout.** After an order is placed, the site's cart is empty, but the
   local cart still holds everything that was bought, and the next sync would
-  put the whole order back. So before every cart change (`add_item`,
+  put the whole order back. So before every cart change (`add_item`, `add_items`,
   `remove_item`, `clear_cart`, `reorder_from_history`), if the local cart isn't
   empty, the server fetches page 1 of the order history. If any order was
   created after the last successful sync, those items were bought: the local

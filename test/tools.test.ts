@@ -910,3 +910,73 @@ test('viewOrder rounds money but leaves a weight-based qty alone', async () => {
   assert.deepEqual(out.lines, [{ productId: '4', name: 'גזר ארוז', price: 2.9, qty: 1.234, lineTotal: 3.58 }]);
   store.close();
 });
+
+test('addItems adds every product with a single sync, and a product listed twice adds up', async () => {
+  const store = tempStore();
+  store.addItem('3', 'Eggs', 12, 1);
+  const syncs: Record<string, string>[] = [];
+  const client = fakeClient({ syncCart: async (items: Record<string, string>) => { syncs.push(items); return acceptAll(items, 40); } });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItems({ items: [
+    { productId: '1', name: 'Milk', price: 6.9, qty: 2 },
+    { productId: '2', name: 'Bread', price: 8.5 },
+    { productId: '1', name: 'Milk', price: 6.9, qty: 1 },
+    { productId: '3', name: 'Eggs', price: 12, qty: 1 },
+  ] })) as { ok: boolean; added: unknown[]; itemCount: number; serverTotal: number };
+  assert.equal(syncs.length, 1);
+  assert.deepEqual(syncs[0], { '1': '3.00', '2': '1.00', '3': '2.00' });
+  assert.equal(out.ok, true);
+  assert.equal(out.added.length, 4);
+  assert.equal(out.itemCount, 3);
+  assert.equal(out.serverTotal, 40);
+  store.close();
+});
+
+test('addItems with a failing sync changes nothing', async () => {
+  const store = tempStore();
+  store.addItem('3', 'Eggs', 12, 1);
+  const client = fakeClient({ syncCart: async () => ({ ok: false, reason: 'auth_expired', status: 401 }) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItems({ items: [{ productId: '1', name: 'Milk', price: 6.9 }, { productId: '3', name: 'Eggs', price: 12 }] })) as { ok: boolean; reason: string };
+  assert.deepEqual([out.ok, out.reason], [false, 'auth_expired']);
+  assert.deepEqual(store.getItems(), [{ productId: '3', name: 'Eggs', price: 12, qty: 1 }]);
+  store.close();
+});
+
+test('addItems reports products the server refused and keeps the rest', async () => {
+  const store = tempStore();
+  const client = fakeClient({ syncCart: async (items: Record<string, string>) => ({ ok: true, acceptedIds: Object.keys(items).filter((id) => id !== '2'), serverTotal: 6.9 }) });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItems({ items: [{ productId: '1', name: 'Milk', price: 6.9 }, { productId: '2', name: 'Gone', price: 5 }] })) as { ok: boolean; reason: string; rejected: unknown };
+  assert.deepEqual([out.ok, out.reason, out.rejected], [false, 'items_rejected', [{ productId: '2', name: 'Gone' }]]);
+  assert.deepEqual(store.getItems().map((i) => i.productId), ['1']);
+  store.close();
+});
+
+test('addItems rejects an empty or oversized batch without calling the client', async () => {
+  const store = tempStore();
+  let called = false;
+  const client = fakeClient({ syncCart: async (items: Record<string, string>) => { called = true; return acceptAll(items); } });
+  const h = ramiLevyToolHandlers(store, client);
+  for (const items of [[], Array.from({ length: 101 }, (_, n) => ({ productId: String(n), name: 'x', price: 1 }))]) {
+    const out = textOf(await h.addItems({ items })) as { ok: boolean; reason: string };
+    assert.deepEqual([out.ok, out.reason], [false, 'invalid_args']);
+  }
+  assert.equal(called, false);
+  store.close();
+});
+
+test('addItems resets after a checkout, like the other cart changes', async () => {
+  const store = tempStore();
+  store.addItem('9', 'Bought already', 5, 1);
+  store.setLastSyncedAt('2026-01-01T00:00:00.000Z');
+  const client = fakeClient({
+    getOrderList: async () => ({ ok: true, data: { orders: [{ id: 77, created_at: '2026-01-02T10:00:00.000Z' }], currentPage: 1, lastPage: 1, total: 1 } }),
+  });
+  const h = ramiLevyToolHandlers(store, client);
+  const out = textOf(await h.addItems({ items: [{ productId: '1', name: 'Milk', price: 6.9 }] })) as { ok: boolean; resetAfterOrder: { orderId: number } };
+  assert.equal(out.ok, true);
+  assert.equal(out.resetAfterOrder.orderId, 77);
+  assert.deepEqual(store.getItems().map((i) => i.productId), ['1']);
+  store.close();
+});
