@@ -275,6 +275,20 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
       return json(await mutateAndSync(store, client, () => store.addItem(args.productId, args.name, args.price, qty)));
     },
 
+    // Many products in one cart change: one checkout check and one sync, instead
+    // of one of each per product. A product listed twice adds up, as add_item
+    // does across calls.
+    async addItems(args: { items: { productId: string; name: string; price: number; qty?: number }[] }): Promise<Content> {
+      const items = args.items.map((i) => ({ ...i, qty: i.qty ?? 1 }));
+      if (items.length === 0 || items.length > MAX_BATCH) {
+        return json({ ok: false, reason: 'invalid_args', message: `items must hold 1 to ${MAX_BATCH} products` });
+      }
+      const added = items.map(({ productId, name, qty }) => ({ productId, name, qty }));
+      return json(await mutateAndSync(store, client, () => {
+        for (const i of items) store.addItem(i.productId, i.name, i.price, i.qty);
+      }, { added }));
+    },
+
     async viewCart(): Promise<Content> {
       return json({
         ok: true,
@@ -314,6 +328,7 @@ export function ramiLevyToolHandlers(store: CartStore, client: RamiLevyClient) {
         ok: true,
         page: result.data.currentPage,
         lastPage: result.data.lastPage,
+        hasNext: result.data.currentPage < result.data.lastPage,
         totalOrders: result.data.total,
         orders: result.data.orders.map((o) => ({
           orderId: o.id,
@@ -448,6 +463,7 @@ const PRICE = z.number().nonnegative();
 const QTY = z.number().positive().optional();
 const LIMIT = z.number().int().min(1).max(50).optional();
 const ORDER_ID = z.string().min(1);
+const MAX_BATCH = 100;
 // Shared by suggest_reorder and reorder_from_history so the preview and the
 // write can't drift apart on what they accept. The relationship between the
 // two (minOccurrences <= numOrders) is checked in validateReorderBounds,
@@ -474,6 +490,7 @@ export const RAMI_LEVY_TOOL_NAMES = [
   'rami_levy_view_order',
   'rami_levy_search_products',
   'rami_levy_add_item',
+  'rami_levy_add_items',
   'rami_levy_view_cart',
   'rami_levy_remove_item',
   'rami_levy_clear_cart',
@@ -502,6 +519,18 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
       inputSchema: { productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY },
     },
     withErrorBoundary(h.addItem),
+  );
+
+  server.registerTool(
+    'rami_levy_add_items',
+    {
+      description: 'Add several products to the shared cart in one step: the same as calling rami_levy_add_item for each, but with a single sync to the real account, ' +
+        `so prefer it whenever more than one product is being added (up to ${MAX_BATCH}). Each item takes productId, name and price from a prior search, order or reorder suggestion, and an optional qty (default 1). ` +
+        'Quantities ADD to what is already in the cart, and a product listed twice adds up. The result lists `added`; if the server refuses some products, ' +
+        'reason is items_rejected and `rejected` names them, while the rest stay added. ' + CART_SYNC_NOTE,
+      inputSchema: { items: z.array(z.object({ productId: PRODUCT_ID, name: NAME, price: PRICE, qty: QTY })).min(1).max(MAX_BATCH) },
+    },
+    withErrorBoundary(h.addItems),
   );
 
   server.registerTool(
@@ -559,7 +588,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
     'rami_levy_list_orders',
     {
       description: 'List one page of the account\'s past orders, newest first: orderId, createdAt (ISO-8601 UTC), supplyAt (the delivery slot, Israel local time), status and total (what was charged, delivery fee included). ' +
-        'Paginated — the response carries page, lastPage and totalOrders, so ask for page 2, 3, … to go further back. Read-only: it never touches the cart. ' +
+        'Paginated — the response carries page, lastPage, hasNext and totalOrders, so ask for page 2, 3, … to go further back; a page past lastPage comes back empty. Read-only: it never touches the cart. ' +
         'Pass an orderId to rami_levy_view_order to see what was in that order.',
       inputSchema: { page: PAGE },
     },
@@ -570,7 +599,7 @@ export function registerRamiLevyTools(server: McpServer, store: CartStore, clien
     'rami_levy_view_order',
     {
       description: 'Show one past order in full: every line with productId, name, unit price, qty and lineTotal, plus the order\'s own total, delivery fee, status and delivery slot. ' +
-        'The orderId comes from rami_levy_list_orders. Read-only: it never touches the cart. ' +
+        'The orderId comes from rami_levy_list_orders. Read-only: it never touches the cart. An unknown orderId returns reason not_found or rejected (Rami Levy answers 422), not a network error. ' +
         'A price, qty or total the order data does not carry is reported as null rather than 0. ' +
         'productId is the same id rami_levy_add_item takes, so a line can be re-added directly — but its price is what was paid then, not today\'s.',
       inputSchema: { orderId: ORDER_ID },

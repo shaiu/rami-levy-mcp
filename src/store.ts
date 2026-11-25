@@ -93,7 +93,8 @@ export class CartStore {
     const row = this.db
       .prepare('SELECT COALESCE(SUM(price * qty), 0) as total FROM cart_items')
       .get() as { total: number };
-    return row.total;
+    // Floating-point sums of prices show as 13.350000000000001; prices are in agorot.
+    return Math.round(row.total * 100) / 100;
   }
 
   // snapshot()/replaceAll() let a tool undo its local change when the sync

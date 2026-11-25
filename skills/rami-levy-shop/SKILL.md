@@ -23,9 +23,10 @@ the user can actually see.
    - Only skip this when the user explicitly asked for a blind reorder
      ("just reorder my usual"). Then call `rami_levy_reorder_from_history`
      with the same arguments: identical selection, applied directly.
-3. **Add what survived** with `rami_levy_add_item`, using the `productId`,
-   `name` and `lastPrice` from the candidate. Each add syncs the whole cart
-   and returns `serverTotal` — Rami Levy's own number, and the authoritative
+3. **Add what survived** in one call to `rami_levy_add_items`, using the
+   `productId`, `name` and `lastPrice` from each candidate (`rami_levy_add_item`
+   for a single product). Each call syncs the whole cart once and returns
+   `serverTotal` — Rami Levy's own number, and the authoritative
    one.
 4. **Fill the gaps** with `rami_levy_search_products`. Search in **Hebrew** —
    the catalog is Hebrew, and an English query returns nothing rather than an

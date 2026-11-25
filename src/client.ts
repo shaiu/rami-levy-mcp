@@ -67,6 +67,8 @@ export interface OrderDetail {
 export type ClientError =
   | { ok: false; reason: 'auth_expired'; status: number }
   | { ok: false; reason: 'blocked_by_cloudflare' }
+  | { ok: false; reason: 'not_found'; status: number; details: string }
+  | { ok: false; reason: 'rejected'; status: number; details: string }
   | { ok: false; reason: 'network_error'; details: string };
 
 export type ClientResult<T> = ({ ok: true } & T) | ClientError;
@@ -121,6 +123,14 @@ export class RamiLevyClient {
       return { ok: false, reason: 'auth_expired', status: res.status };
     }
 
+    // Any other 4xx is Rami Levy refusing this request (an unknown order id
+    // comes back as 422): retrying will not help, so it is not a network error.
+    if (res.status === 404) {
+      return { ok: false, reason: 'not_found', status: res.status, details: await errorText(res) };
+    }
+    if (res.status >= 400 && res.status < 500) {
+      return { ok: false, reason: 'rejected', status: res.status, details: await errorText(res) };
+    }
     if (!res.ok) {
       return { ok: false, reason: 'network_error', details: `HTTP ${res.status}` };
     }
@@ -261,6 +271,16 @@ export class RamiLevyClient {
       return { ok: false, reason: 'network_error', details: `Unexpected order detail shape: ${JSON.stringify(result).slice(0, 200)}` };
     }
     return { ok: true, data: result.data };
+  }
+}
+
+/** The `message` of a JSON error body, or its HTTP status; never throws. */
+async function errorText(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { message?: unknown };
+    return typeof body?.message === 'string' && body.message ? `HTTP ${res.status}: ${body.message}`.slice(0, 300) : `HTTP ${res.status}`;
+  } catch {
+    return `HTTP ${res.status}`;
   }
 }
 

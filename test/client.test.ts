@@ -354,3 +354,16 @@ test('getOrderList parses a numeric OrderSummary.id and a numeric OrderLine.quan
   if (!result.ok) return;
   assert.deepEqual(result.data.orders, [{ id: 999, created_at: '2026-09-08 10:00:00' }]);
 });
+
+test('a JSON 404 is not_found and other 4xx are rejected, neither is a network error', async (t) => {
+  const client = new RamiLevyClient(CONFIG);
+  captureFetch(t, () => fakeResponse(422, { message: 'The given data was invalid.' }));
+  assert.deepEqual(await client.getOrderDetail('999'), { ok: false, reason: 'rejected', status: 422, details: 'HTTP 422: The given data was invalid.' });
+  t.mock.restoreAll();
+  captureFetch(t, () => fakeResponse(404, { nope: true }));
+  assert.deepEqual(await client.getOrderDetail('999'), { ok: false, reason: 'not_found', status: 404, details: 'HTTP 404' });
+  t.mock.restoreAll();
+  captureFetch(t, () => fakeResponse(503, { message: 'down' }));
+  assert.deepEqual(await client.getOrderDetail('999'), { ok: false, reason: 'network_error', details: 'HTTP 503' });
+});
+

@@ -58,6 +58,13 @@ test('getTotal sums price times qty across all items', () => {
   store.close();
 });
 
+test('getTotal rounds to agorot, so a weighed line does not show float noise', () => {
+  const store = new CartStore(tempDbPath());
+  store.addItem('2', 'Tomato', 8.9, 1.5);
+  assert.equal(store.getTotal(), 13.35);
+  store.close();
+});
+
 test('getTotal on an empty cart is 0, not null or NaN', () => {
   const store = new CartStore(tempDbPath());
   assert.equal(store.getTotal(), 0);
